@@ -185,8 +185,13 @@ local bufnr = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_set_current_buf(bufnr)
 state.bind_buffer(thread, bufnr)
 thread.blocks = blocks
+thread.last_error = "curl: timed out\n"
 require("alma.ui.render").render(thread)
 assert(vim.api.nvim_buf_line_count(bufnr) > 5, "render produced lines")
+for _, line in ipairs(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)) do
+  assert(not line:find("\n", 1, true), "render line must not contain newline")
+end
+thread.last_error = nil
 
 print("alma.nvim validation OK")
 vim.cmd("qa")

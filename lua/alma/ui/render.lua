@@ -15,7 +15,14 @@ local foldable_types = {
 }
 
 local function add(lines, value)
-  table.insert(lines, value or "")
+  local text_lines = util.split_lines(value)
+  if #text_lines == 0 then
+    table.insert(lines, "")
+  else
+    for _, line in ipairs(text_lines) do
+      table.insert(lines, line)
+    end
+  end
   return #lines
 end
 
