@@ -95,25 +95,54 @@ local function tool_name(part)
   return typ:gsub("^tool%-", "")
 end
 
+local function metadata_of(item)
+  if type(item) ~= "table" then
+    return {}
+  end
+  return item.metadata or item.userMessageMetadata or {}
+end
+
+local function parts_text(parts)
+  local text_parts = {}
+  for _, part in ipairs(parts or {}) do
+    local text = part_text(part)
+    if text ~= "" then
+      table.insert(text_parts, text)
+    end
+  end
+  return table.concat(text_parts, "\n")
+end
+
+local function looks_like_user_message(item, msg, id)
+  if msg.role == "user" or item.role == "user" then
+    return true
+  end
+  if type(id) == "string" and (vim.startswith(id, "user-") or id:find("%-%-user%-") ~= nil) then
+    return true
+  end
+  return first_text(metadata_of(item).original_text, metadata_of(item).originalText) ~= ""
+end
+
 local function block_from_message(item, index)
   local msg = message_of(item)
-  local role = msg.role or msg.type or item.role or "assistant"
   local id = msg.id or item.id or ("message-" .. index)
+  local role = msg.role or msg.type or item.role
+  if not role then
+    role = looks_like_user_message(item, msg, id) and "user" or "assistant"
+  end
   local parts = msg.parts or item.parts or {}
   local blocks = {}
+  local metadata = metadata_of(item)
 
   local content = first_text(msg.content, msg.text, item.content, item.text)
+  if content == "" and #parts > 0 then
+    content = parts_text(parts)
+  end
+  if role == "user" and content == "" then
+    content = first_text(metadata.original_text, metadata.originalText, metadata.userMessage, metadata.prompt)
+  end
+
   if role == "user" then
-    if content == "" and #parts > 0 then
-      local text_parts = {}
-      for _, part in ipairs(parts) do
-        local text = part_text(part)
-        if text ~= "" then
-          table.insert(text_parts, text)
-        end
-      end
-      content = table.concat(text_parts, "\n")
-    end
     table.insert(blocks, {
       type = "UserBlock",
       message_id = id,

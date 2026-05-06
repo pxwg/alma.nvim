@@ -69,6 +69,16 @@ assert_eq(blocks[1].type, "AssistantBlock", "message text block")
 assert_eq(blocks[2].type, "ReasoningBlock", "message reasoning block")
 assert_eq(blocks[3].type, "ToolCallBlock", "message tool block")
 
+local nvim_user_blocks = events.normalize_messages({
+  {
+    id = "thread--user-1",
+    message = { id = "user-1" },
+    metadata = { original_text = "hello from nvim" },
+  },
+})
+assert_eq(nvim_user_blocks[1].type, "UserBlock", "nvim user skeleton block")
+assert_eq(nvim_user_blocks[1].text, "hello from nvim", "nvim user skeleton text")
+
 local parsed = ws._test.parse_url("ws://localhost:23001/ws/threads")
 assert_eq(parsed.host, "localhost", "ws url host")
 assert_eq(parsed.port, 23001, "ws url port")
