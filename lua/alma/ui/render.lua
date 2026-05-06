@@ -14,6 +14,16 @@ local foldable_types = {
   AgentTimelineBlock = true,
 }
 
+local assistant_content_types = {
+  AssistantBlock = true,
+  ReasoningBlock = true,
+  ToolCallBlock = true,
+  ToolOutputBlock = true,
+  RawEventBlock = true,
+  AgentTimelineBlock = true,
+  ErrorBlock = true,
+}
+
 local function add(lines, value)
   local text_lines = util.split_lines(value)
   if #text_lines == 0 then
@@ -78,13 +88,16 @@ local function render_tool(lines, block)
   end
 end
 
-local function render_block(thread, lines, block)
+local function render_block(thread, lines, block, opts)
+  opts = opts or {}
   local start = #lines + 1
   if block.type == "UserBlock" then
     add(lines, "## You" .. (block.state and (" [" .. block.state .. "]") or ""))
     add_text(lines, block.text)
   elseif block.type == "AssistantBlock" then
-    add(lines, "## Alma" .. (block.state and (" [" .. block.state .. "]") or ""))
+    if not opts.assistant_body then
+      add(lines, "## Alma" .. (block.state and (" [" .. block.state .. "]") or ""))
+    end
     add_text(lines, block.text)
   elseif block.type == "ReasoningBlock" then
     add(lines, "### Reasoning" .. (block.state and (" [" .. block.state .. "]") or ""))
@@ -113,6 +126,30 @@ local function render_block(thread, lines, block)
     table.insert(thread.folds, { start = start, finish = finish })
   end
   add(lines, "")
+end
+
+local function assistant_group_id(block)
+  if not block or not block.message_id or not assistant_content_types[block.type] then
+    return nil
+  end
+  return block.message_id
+end
+
+local function render_assistant_group(thread, lines, blocks, index)
+  local group_id = assistant_group_id(blocks[index])
+  local first_block = blocks[index]
+  local start = #lines + 1
+  add(lines, "## Alma")
+  for lnum = start, #lines do
+    thread.render_index[lnum] = first_block
+  end
+  add(lines, "")
+
+  while index <= #blocks and assistant_group_id(blocks[index]) == group_id do
+    render_block(thread, lines, blocks[index], { assistant_body = true })
+    index = index + 1
+  end
+  return index
 end
 
 local function existing_prompt(thread)
@@ -190,8 +227,15 @@ function M.render(thread)
   end
   add(lines, "")
 
-  for _, block in ipairs(M.select_render_tree(thread)) do
-    render_block(thread, lines, block)
+  local blocks = M.select_render_tree(thread)
+  local index = 1
+  while index <= #blocks do
+    if assistant_group_id(blocks[index]) then
+      index = render_assistant_group(thread, lines, blocks, index)
+    else
+      render_block(thread, lines, blocks[index])
+      index = index + 1
+    end
   end
 
   add(lines, config.get().render.prompt_marker)

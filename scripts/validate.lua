@@ -202,13 +202,25 @@ thread.generation = "idle"
 local bufnr = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_set_current_buf(bufnr)
 state.bind_buffer(thread, bufnr)
-thread.blocks = blocks
+thread.blocks = {
+  { type = "UserBlock", message_id = "u1", text = "sleep improved" },
+}
+for _, block in ipairs(chronological_blocks) do
+  table.insert(thread.blocks, block)
+end
 thread.last_error = "curl: timed out\n"
 require("alma.ui.render").render(thread)
 assert(vim.api.nvim_buf_line_count(bufnr) > 5, "render produced lines")
-for _, line in ipairs(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)) do
+local rendered_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+local positions = {}
+for index, line in ipairs(rendered_lines) do
+  positions[line] = positions[line] or index
   assert(not line:find("\n", 1, true), "render line must not contain newline")
 end
+assert(positions["## You"] < positions["## Alma"], "user renders before assistant group")
+assert(positions["## Alma"] < positions["### Agent Timeline: step-start"], "assistant heading wraps timeline")
+assert(positions["### Agent Timeline: step-start"] < positions["### Reasoning [done]"], "timeline renders before reasoning")
+assert(positions["### Reasoning [done]"] < positions["answer second"], "reasoning renders before assistant text")
 thread.last_error = nil
 
 print("alma.nvim validation OK")
