@@ -44,6 +44,9 @@ assert_eq(spec.ephemeral_context[1].type, "diagnostics", "parser context")
 local payload = parser.compile_request(thread, spec)
 assert_eq(payload.type, "generate_response", "compiled payload type")
 assert_eq(payload.data.threadId, "validate-thread", "compiled payload thread")
+assert_eq(payload.data.userMessage.role, "user", "compiled user message role")
+assert_eq(payload.data.userMessage.parts[1].type, "text", "compiled user message part type")
+assert_eq(payload.data.userMessage.parts[1].text, "hello alma", "compiled user message text")
 
 local normalized = events.normalize_ws_event({
   type = "text_delta",

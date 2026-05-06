@@ -177,7 +177,12 @@ function M.compile_request(thread, spec)
     type = "generate_response",
     data = {
       threadId = thread.id,
-      userMessage = spec.prompt,
+      userMessage = {
+        role = "user",
+        parts = {
+          { type = "text", text = spec.prompt },
+        },
+      },
       model = spec.model or thread.config.model,
       reasoningEffort = spec.reasoning_effort or thread.config.reasoning_effort,
       tools = spec.tools,
