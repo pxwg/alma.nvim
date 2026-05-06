@@ -79,6 +79,9 @@ local function queue_request(thread, request, effects)
     level = vim.log.levels.WARN,
     message = "Alma request queued for thread " .. util.short_id(thread.id) .. "; it will run after the current generation completes.",
   })
+  if thread.backend_generating and not thread.pending_request and thread.generation == "idle" then
+    table.insert(effects, { type = "rest_fetch_thread", thread_id = thread.id })
+  end
   table.insert(effects, { type = "render", thread_id = thread.id })
 end
 
@@ -134,10 +137,18 @@ local function apply_thread_metadata(thread, payload)
   thread.config.reasoning_effort = source.reasoningEffort or source.reasoning_effort or thread.config.reasoning_effort
   thread.config.tools = source.tools or thread.config.tools
   thread.config.skills = source.skillIds or source.skills or thread.config.skills
+  local was_backend_generating = thread.backend_generating
   thread.backend_generating = util.truthy(source.isGenerating) or util.truthy(source.generating)
   if thread.backend_generating and thread.generation == "idle" then
     thread.generation = "streaming"
     thread.status_message = "Alma GUI/backend is generating for this thread."
+  elseif was_backend_generating and not thread.backend_generating and not thread.pending_request then
+    if thread.generation == "streaming" or thread.generation == "tool_running" then
+      thread.generation = "idle"
+    end
+    if thread.generation == "idle" then
+      thread.status_message = nil
+    end
   end
 end
 
@@ -191,6 +202,7 @@ function M.reduce_thread(thread, event)
   elseif event.type == "rest_thread_loaded" then
     apply_thread_metadata(thread, event.thread)
     table.insert(effects, { type = "render", thread_id = thread.id })
+    pop_queue_if_ready(thread, effects)
   elseif event.type == "rest_messages_loaded" then
     thread.messages = event.messages or {}
     thread.blocks = events.normalize_messages(thread.messages)

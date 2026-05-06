@@ -37,11 +37,28 @@ local function data_of(raw)
   return raw.data or raw.payload or raw
 end
 
+local function composite_thread_id(...)
+  for _, value in ipairs({ ... }) do
+    if type(value) == "string" then
+      local thread_id = value:match("^(.-)%-%-")
+      if thread_id and thread_id ~= "" then
+        return thread_id
+      end
+    end
+  end
+  return nil
+end
+
+function M.is_thread_scoped_event(name)
+  return M.known_ws_events[name] == true
+end
+
 function M.thread_id_from(raw)
   local data = data_of(raw)
   local message = data.message or raw.message or {}
   local thread = data.thread or raw.thread or {}
-  return data.threadId
+  local name = raw.type or raw.event or raw.name
+  local direct = data.threadId
     or data.thread_id
     or data.threadID
     or thread.id
@@ -50,6 +67,13 @@ function M.thread_id_from(raw)
     or message.thread_id
     or raw.threadId
     or raw.thread_id
+  if direct then
+    return direct
+  end
+  if type(name) == "string" and vim.startswith(name, "thread_") then
+    return data.id or raw.id
+  end
+  return composite_thread_id(data.id, data.parentId, data.parent_id, data.slotId, data.slot_id, raw.id, raw.parentId, raw.slotId)
 end
 
 function M.normalize_ws_event(raw)

@@ -55,6 +55,17 @@ local normalized = events.normalize_ws_event({
 assert_eq(normalized.thread_id, "validate-thread", "ws event thread id")
 assert_eq(normalized.known, true, "ws event known")
 
+local thread_generating = events.normalize_ws_event({
+  type = "thread_generating",
+  data = { id = "validate-thread", isGenerating = true },
+})
+assert_eq(thread_generating.thread_id, "validate-thread", "thread event data id")
+local message_added = events.normalize_ws_event({
+  type = "message_added",
+  data = { id = "validate-thread--message-1" },
+})
+assert_eq(message_added.thread_id, "validate-thread", "message event composite id")
+
 local blocks = events.normalize_messages({
   {
     message = {
@@ -140,6 +151,8 @@ end)
 assert_eq(seen, "hello", "ws frame roundtrip")
 
 thread.backend_generating = true
+thread.generation = "idle"
+thread.pending_request = nil
 local _, effects = core.reduce_thread(thread, {
   type = "submit",
   request = { spec = spec, payload = payload, created_at = 1 },
@@ -147,9 +160,26 @@ local _, effects = core.reduce_thread(thread, {
 assert_eq(#thread.queue, 1, "busy submit queues")
 assert(#thread.local_blocks >= 2, "queued submit renders local blocks")
 assert(effects[1].type == "notify" or effects[2].type == "notify", "queued submit notifies")
+local has_rest_fetch_thread = false
+for _, effect in ipairs(effects) do
+  has_rest_fetch_thread = has_rest_fetch_thread or effect.type == "rest_fetch_thread"
+end
+assert(has_rest_fetch_thread, "stale backend queue verifies thread metadata")
+local _, metadata_effects = core.reduce_thread(thread, {
+  type = "rest_thread_loaded",
+  thread = { id = "validate-thread", isGenerating = false },
+})
+assert_eq(thread.backend_generating, false, "rest metadata clears stale backend generation")
+assert_eq(#thread.queue, 0, "rest metadata releases queued submit")
+local has_dispatch = false
+for _, effect in ipairs(metadata_effects) do
+  has_dispatch = has_dispatch or effect.type == "dispatch"
+end
+assert(has_dispatch, "rest metadata dispatches released queue")
 thread.backend_generating = false
 thread.queue = {}
 thread.local_blocks = {}
+thread.generation = "idle"
 
 local bufnr = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_set_current_buf(bufnr)
