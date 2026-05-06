@@ -8,7 +8,7 @@ fast updates and request submission.
 
 - Neovim 0.12.0 or newer.
 - `curl` in `PATH`.
-- Alma API running locally. The default is `http://localhost:23001`; override
+- Alma API running locally. The default is `http://127.0.0.1:23001`; override
   with `ALMA_API_URL` or `require("alma").setup({ api_url = "..." })`.
 - LuaRocks for dependency management. This MVP has no external Lua runtime
   dependency beyond Neovim's Lua environment, but the rockspec is the canonical
@@ -20,7 +20,7 @@ With a plugin manager, add this repository and call:
 
 ```lua
 require("alma").setup({
-  api_url = vim.env.ALMA_API_URL or "http://localhost:23001",
+  api_url = vim.env.ALMA_API_URL or "http://127.0.0.1:23001",
 })
 ```
 

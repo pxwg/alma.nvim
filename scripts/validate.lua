@@ -14,6 +14,17 @@ local core = require("alma.core")
 local events = require("alma.events")
 local state = require("alma.state")
 local ws = require("alma.ws")
+local config = require("alma.config")
+
+local expected_api_url = (vim.env.ALMA_API_URL or "http://127.0.0.1:23001"):gsub("/+$", "")
+assert_eq(config.api_url(), expected_api_url, "default or env api url")
+if not vim.env.ALMA_API_URL then
+  assert_eq(config.ws_url(), "ws://127.0.0.1:23001/ws/threads", "default ws url")
+end
+config.setup({ notify = false, api_url = "http://localhost:23001/" })
+assert_eq(config.api_url(), "http://localhost:23001", "setup api url override")
+assert_eq(config.ws_url(), "ws://localhost:23001/ws/threads", "setup ws url override")
+config.setup({ notify = false })
 
 local thread = state.get_thread("validate-thread", { cwd = root })
 local spec = parser.parse_input({
@@ -61,6 +72,52 @@ assert_eq(blocks[3].type, "ToolCallBlock", "message tool block")
 local parsed = ws._test.parse_url("ws://localhost:23001/ws/threads")
 assert_eq(parsed.host, "localhost", "ws url host")
 assert_eq(parsed.port, 23001, "ws url port")
+
+local original_new_tcp = vim.uv.new_tcp
+local attempts = {}
+local handles = {}
+vim.uv.new_tcp = function()
+  local handle = {}
+  table.insert(handles, handle)
+  function handle:connect(addr, port, callback)
+    table.insert(attempts, { addr = addr, port = port })
+    if addr == "::1" then
+      callback("ECONNREFUSED")
+    else
+      callback(nil)
+    end
+  end
+  function handle:close()
+    self.closed = true
+  end
+  return handle
+end
+
+local retry_client = ws.new({ url = "ws://localhost:23001/ws/threads" })
+retry_client.parsed = parsed
+retry_client.status = "connecting"
+retry_client.connect_id = {}
+retry_client._start_read = function(self)
+  self.started = true
+end
+retry_client._write_handshake = function(self)
+  self.handshake_written = true
+end
+
+local ok, retry_err = pcall(function()
+  retry_client:_connect_addresses({ { addr = "::1" }, { addr = "127.0.0.1" } }, 1, nil, retry_client.connect_id)
+  assert_eq(#attempts, 2, "ws retry attempt count")
+  assert_eq(attempts[1].addr, "::1", "ws retry first address")
+  assert_eq(attempts[2].addr, "127.0.0.1", "ws retry second address")
+  assert_eq(attempts[2].port, 23001, "ws retry port")
+  assert_eq(handles[1].closed, true, "ws retry closes failed tcp")
+  assert_eq(retry_client.started, true, "ws retry starts read")
+  assert_eq(retry_client.handshake_written, true, "ws retry writes handshake")
+end)
+vim.uv.new_tcp = original_new_tcp
+if not ok then
+  error(retry_err)
+end
 
 local frame = ws._test.encode_frame("hello", 1)
 local seen

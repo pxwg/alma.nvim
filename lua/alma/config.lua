@@ -1,7 +1,7 @@
 local M = {}
 
 local defaults = {
-  api_url = vim.env.ALMA_API_URL or "http://localhost:23001",
+  api_url = vim.env.ALMA_API_URL or "http://127.0.0.1:23001",
   ws_url = nil,
   request_timeout_ms = 5000,
   ack_timeout_ms = 2000,

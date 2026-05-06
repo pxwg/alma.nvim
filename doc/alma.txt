@@ -4,7 +4,7 @@ Requirements~
 
 Neovim 0.12.0 or newer is required. The local Alma API defaults to:
 
-  http://localhost:23001
+  http://127.0.0.1:23001
 
 Set `ALMA_API_URL` or pass `api_url` to setup to override it.
 
@@ -12,7 +12,7 @@ Setup~
 
 >lua
   require("alma").setup({
-    api_url = vim.env.ALMA_API_URL or "http://localhost:23001",
+    api_url = vim.env.ALMA_API_URL or "http://127.0.0.1:23001",
   })
 <
 

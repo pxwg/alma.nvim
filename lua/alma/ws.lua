@@ -155,6 +155,15 @@ local function decode_frames(buffer, on_frame)
   return buffer:sub(offset)
 end
 
+local function close_tcp(tcp)
+  if not tcp then
+    return
+  end
+  pcall(function()
+    tcp:close()
+  end)
+end
+
 function Client.new(opts)
   return setmetatable(vim.tbl_deep_extend("force", {
     status = "offline",
@@ -200,20 +209,60 @@ function Client:connect()
 
   self.parsed = parsed
   self:_status("connecting")
+  self.connect_id = {}
+  local connect_id = self.connect_id
   vim.uv.getaddrinfo(parsed.host, nil, { socktype = "stream" }, function(resolve_err, addresses)
+    if self.connect_id ~= connect_id or self.status ~= "connecting" then
+      return
+    end
     if resolve_err or not addresses or not addresses[1] then
       self:_error(resolve_err or ("could not resolve " .. parsed.host))
       return
     end
-    self.tcp = vim.uv.new_tcp()
-    self.tcp:connect(addresses[1].addr, parsed.port, function(connect_err)
-      if connect_err then
-        self:_error(connect_err)
-        return
-      end
-      self:_start_read()
-      self:_write_handshake()
-    end)
+    self:_connect_addresses(addresses, 1, nil, connect_id)
+  end)
+end
+
+function Client:_connect_addresses(addresses, index, last_err, connect_id)
+  if self.connect_id ~= connect_id or self.status ~= "connecting" then
+    return
+  end
+
+  local address = addresses[index]
+  if not address then
+    self:_error(last_err or ("could not connect to " .. self.parsed.host .. ":" .. self.parsed.port))
+    return
+  end
+  if not address.addr then
+    self:_connect_addresses(addresses, index + 1, last_err, connect_id)
+    return
+  end
+
+  local tcp = vim.uv.new_tcp()
+  if not tcp then
+    self:_connect_addresses(addresses, index + 1, "could not create tcp handle", connect_id)
+    return
+  end
+
+  self.tcp = tcp
+  tcp:connect(address.addr, self.parsed.port, function(connect_err)
+    if self.connect_id ~= connect_id or self.tcp ~= tcp or self.status ~= "connecting" then
+      close_tcp(tcp)
+      return
+    end
+    if connect_err then
+      close_tcp(tcp)
+      self.tcp = nil
+      self:_connect_addresses(
+        addresses,
+        index + 1,
+        string.format("%s:%d: %s", address.addr, self.parsed.port, connect_err),
+        connect_id
+      )
+      return
+    end
+    self:_start_read()
+    self:_write_handshake()
   end)
 end
 
@@ -325,6 +374,7 @@ function Client:close()
     end)
   end
   self.tcp = nil
+  self.connect_id = nil
   self:_status("offline", "closed")
 end
 
