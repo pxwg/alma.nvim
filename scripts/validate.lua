@@ -83,6 +83,24 @@ assert_eq(blocks[1].type, "AssistantBlock", "message text block")
 assert_eq(blocks[2].type, "ReasoningBlock", "message reasoning block")
 assert_eq(blocks[3].type, "ToolCallBlock", "message tool block")
 
+local chronological_blocks = events.normalize_messages({
+  {
+    message = {
+      id = "m2",
+      role = "assistant",
+      parts = {
+        { type = "step-start" },
+        { type = "reasoning", text = "thinking first", state = "done" },
+        { type = "text", text = "answer second" },
+      },
+    },
+  },
+})
+assert_eq(chronological_blocks[1].type, "AgentTimelineBlock", "chronological timeline block")
+assert_eq(chronological_blocks[1].title, "step-start", "timeline fallback title")
+assert_eq(chronological_blocks[2].type, "ReasoningBlock", "chronological reasoning block")
+assert_eq(chronological_blocks[3].type, "AssistantBlock", "chronological assistant block")
+
 local nvim_user_blocks = events.normalize_messages({
   {
     id = "thread--user-1",

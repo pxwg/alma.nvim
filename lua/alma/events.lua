@@ -95,7 +95,8 @@ function M.normalize_ws_event(raw)
 end
 
 local function first_text(...)
-  for _, value in ipairs({ ... }) do
+  for index = 1, select("#", ...) do
+    local value = select(index, ...)
     if type(value) == "string" and value ~= "" then
       return value
     end
@@ -187,6 +188,19 @@ local function block_from_message(item, index)
   end
 
   local assistant_text = {}
+  local function flush_assistant_text()
+    if #assistant_text == 0 then
+      return
+    end
+    table.insert(blocks, {
+      type = "AssistantBlock",
+      message_id = id,
+      text = table.concat(assistant_text, "\n"),
+      raw = item,
+    })
+    assistant_text = {}
+  end
+
   for _, part in ipairs(parts) do
     local typ = part.type or "text"
     if typ == "text" then
@@ -195,6 +209,7 @@ local function block_from_message(item, index)
         table.insert(assistant_text, text)
       end
     elseif typ == "reasoning" then
+      flush_assistant_text()
       table.insert(blocks, {
         type = "ReasoningBlock",
         message_id = id,
@@ -203,6 +218,7 @@ local function block_from_message(item, index)
         raw = part,
       })
     elseif typ == "step-start" then
+      flush_assistant_text()
       table.insert(blocks, {
         type = "AgentTimelineBlock",
         message_id = id,
@@ -211,6 +227,7 @@ local function block_from_message(item, index)
         raw = part,
       })
     elseif vim.startswith(typ, "tool-") then
+      flush_assistant_text()
       table.insert(blocks, {
         type = "ToolCallBlock",
         message_id = id,
@@ -223,6 +240,7 @@ local function block_from_message(item, index)
         raw = part,
       })
     else
+      flush_assistant_text()
       table.insert(blocks, {
         type = "RawEventBlock",
         message_id = id,
@@ -231,15 +249,7 @@ local function block_from_message(item, index)
       })
     end
   end
-
-  if #assistant_text > 0 then
-    table.insert(blocks, 1, {
-      type = "AssistantBlock",
-      message_id = id,
-      text = table.concat(assistant_text, "\n"),
-      raw = item,
-    })
-  end
+  flush_assistant_text()
 
   return blocks
 end
