@@ -222,6 +222,19 @@ assert(positions["## Alma"] < positions["### Agent Timeline: step-start"], "assi
 assert(positions["### Agent Timeline: step-start"] < positions["### Reasoning [done]"], "timeline renders before reasoning")
 assert(positions["### Reasoning [done]"] < positions["answer second"], "reasoning renders before assistant text")
 assert_eq(rendered_lines[#rendered_lines - 1], "## You", "idle prompt uses user header")
+local render_ns = vim.api.nvim_get_namespaces()["alma.nvim"]
+local overlay_width_ok = false
+for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, render_ns, 0, -1, { details = true })) do
+  local details = mark[4] or {}
+  if details.virt_text_pos == "overlay" and details.virt_text then
+    local text = ""
+    for _, chunk in ipairs(details.virt_text) do
+      text = text .. (chunk[1] or "")
+    end
+    overlay_width_ok = overlay_width_ok or vim.fn.strdisplaywidth(text) >= vim.o.columns
+  end
+end
+assert(overlay_width_ok, "header overlay covers current window width")
 assert_eq(vim.bo[bufnr].modifiable, true, "idle chat buffer is editable")
 thread.last_error = nil
 

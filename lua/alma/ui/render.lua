@@ -140,26 +140,56 @@ local function mark_header(thread, line, kind, title, meta, block)
   })
 end
 
-local function header_virt_text(mark)
+local function chunks_width(chunks)
+  local width = 0
+  for _, chunk in ipairs(chunks or {}) do
+    width = width + vim.fn.strdisplaywidth(chunk[1] or "")
+  end
+  return width
+end
+
+local function repeat_to_width(text, target_width)
+  local unit_width = math.max(1, vim.fn.strdisplaywidth(text))
+  return string.rep(text, math.max(1, math.ceil(target_width / unit_width)))
+end
+
+local function window_text_width(win)
+  local width = vim.api.nvim_win_get_width(win)
+  local ok, info = pcall(vim.fn.getwininfo, win)
+  if ok and info and info[1] and info[1].textoff then
+    width = width - info[1].textoff
+  end
+  return math.max(20, width)
+end
+
+local function header_target_width(bufnr)
+  local width = vim.o.columns
+  for _, win in ipairs(vim.fn.win_findbuf(bufnr)) do
+    if vim.api.nvim_win_is_valid(win) then
+      width = math.max(width, window_text_width(win))
+    end
+  end
+  return width + 32
+end
+
+local function header_virt_text(mark, target_width)
   local title = " " .. tostring(mark.title or "") .. " "
   local chunks = { { title, header_hl(mark.kind) } }
   if mark.meta and #mark.meta > 0 then
     table.insert(chunks, { " " .. table.concat(mark.meta, " · ") .. " ", "AlmaHeaderMeta" })
   end
-  local used = vim.fn.strdisplaywidth(table.concat(vim.tbl_map(function(chunk)
-    return chunk[1]
-  end, chunks), ""))
   local sep = config.get().render.separator or "───"
-  local remaining = math.max(3, vim.o.columns - used - 1)
-  table.insert(chunks, { string.rep(sep, math.max(1, math.ceil(remaining / #sep))), "AlmaHeaderSeparator" })
+  local remaining = math.max(vim.fn.strdisplaywidth(sep), target_width - chunks_width(chunks))
+  table.insert(chunks, { repeat_to_width(sep, remaining), "AlmaHeaderSeparator" })
   return chunks
 end
 
 local function apply_header_marks(thread, bufnr)
+  local target_width = header_target_width(bufnr)
   for _, mark in ipairs(thread.header_marks or {}) do
     vim.api.nvim_buf_set_extmark(bufnr, ns, mark.line - 1, 0, {
       conceal = "",
-      virt_text = header_virt_text(mark),
+      virt_text = header_virt_text(mark, target_width),
       virt_text_pos = "overlay",
       priority = 2000,
       strict = false,
