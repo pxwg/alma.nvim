@@ -5,8 +5,32 @@ local util = require("alma.util")
 local M = {}
 
 local group = vim.api.nvim_create_augroup("alma.nvim.buffers", { clear = true })
+local view_autocmds_setup = false
+
+local function setup_view_autocmds()
+  if view_autocmds_setup then
+    return
+  end
+  view_autocmds_setup = true
+  vim.api.nvim_create_autocmd("WinScrolled", {
+    group = group,
+    callback = function(event)
+      local data = event.data or {}
+      local v_event = vim.v.event or {}
+      local win = tonumber(data.winid or v_event.winid or event.match)
+      if not win or not vim.api.nvim_win_is_valid(win) then
+        return
+      end
+      local thread = state.thread_for_buf(vim.api.nvim_win_get_buf(win))
+      if thread then
+        require("alma.ui.render").on_user_view_changed(thread, win, "viewport")
+      end
+    end,
+  })
+end
 
 local function setup_buffer_autocmds(bufnr, thread_id)
+  setup_view_autocmds()
   vim.api.nvim_create_autocmd({ "BufEnter", "BufWinEnter" }, {
     group = group,
     buffer = bufnr,
@@ -26,6 +50,17 @@ local function setup_buffer_autocmds(bufnr, thread_id)
     buffer = bufnr,
     callback = function()
       state.buffers[bufnr] = nil
+    end,
+  })
+  vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
+    group = group,
+    buffer = bufnr,
+    callback = function()
+      local win = vim.api.nvim_get_current_win()
+      local thread = state.get_thread(thread_id)
+      if thread and vim.api.nvim_win_get_buf(win) == bufnr then
+        require("alma.ui.render").on_user_view_changed(thread, win, "cursor")
+      end
     end,
   })
 end
@@ -107,6 +142,8 @@ function M.submit_current(args)
   for _, warning in ipairs(spec.warnings or {}) do
     util.notify(warning, vim.log.levels.WARN)
   end
+
+  require("alma.ui.render").prepare_submit_follow(thread, vim.api.nvim_get_current_win())
 
   local request = {
     spec = spec,

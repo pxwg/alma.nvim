@@ -15,6 +15,43 @@ local events = require("alma.events")
 local state = require("alma.state")
 local ws = require("alma.ws")
 local config = require("alma.config")
+local render = require("alma.ui.render")
+
+local function save_view(win)
+  return vim.api.nvim_win_call(win, function()
+    return vim.fn.winsaveview()
+  end)
+end
+
+local function restore_view(win, view)
+  vim.api.nvim_win_call(win, function()
+    vim.fn.winrestview(view)
+  end)
+end
+
+local function assert_near_bottom(win, bufnr, label)
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  local cursor = vim.api.nvim_win_get_cursor(win)
+  local info = vim.fn.getwininfo(win)[1] or {}
+  assert(line_count - cursor[1] <= 5, label .. " cursor follows bottom")
+  assert(line_count - (info.botline or cursor[1]) <= 5, label .. " viewport follows bottom")
+end
+
+local function history_blocks(prefix, count)
+  local blocks = {}
+  for index = 1, count do
+    table.insert(blocks, { type = "UserBlock", text = prefix .. " question " .. tostring(index) })
+    table.insert(blocks, {
+      type = "AssistantBlock",
+      text = table.concat({
+        prefix .. " answer " .. tostring(index),
+        "detail line " .. tostring(index),
+        "more detail " .. tostring(index),
+      }, "\n"),
+    })
+  end
+  return blocks
+end
 
 local expected_api_url = (vim.env.ALMA_API_URL or "http://127.0.0.1:23001"):gsub("/+$", "")
 assert_eq(config.api_url(), expected_api_url, "default or env api url")
@@ -234,7 +271,7 @@ for _, block in ipairs(chronological_blocks) do
   table.insert(thread.blocks, block)
 end
 thread.last_error = "curl: timed out\n"
-require("alma.ui.render").render(thread)
+render.render(thread)
 assert(vim.api.nvim_buf_line_count(bufnr) > 5, "render produced lines")
 local rendered_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 local positions = {}
@@ -263,6 +300,9 @@ assert(overlay_width_ok, "header overlay covers current window width")
 assert_eq(vim.bo[bufnr].modifiable, true, "idle chat buffer is editable")
 thread.last_error = nil
 
+local sticky_win = vim.api.nvim_get_current_win()
+vim.api.nvim_win_set_cursor(sticky_win, { thread.prompt_start + 1, 0 })
+render.prepare_submit_follow(thread, sticky_win)
 thread.pending_request = { spec = spec, payload = payload, created_at = 2 }
 thread.generation = "submitted"
 thread.streaming_text = nil
@@ -271,7 +311,7 @@ thread.local_blocks = {
   { type = "UserBlock", text = "Test", local_only = true },
   { type = "AssistantBlock", text = "⏳ Alma is thinking...", state = "loading", local_only = true },
 }
-require("alma.ui.render").render(thread)
+render.render(thread)
 local locked_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 local you_count = 0
 local old_heading_count = 0
@@ -286,9 +326,81 @@ end
 assert_eq(you_count, 1, "locked render has one user block and no prompt")
 assert_eq(old_heading_count, 0, "locked render hides submitted/waiting backend headings")
 assert_eq(vim.bo[bufnr].modifiable, false, "generating chat buffer is locked")
+assert_near_bottom(sticky_win, bufnr, "sticky locked render")
 thread.pending_request = nil
 thread.generation = "idle"
 thread.local_blocks = {}
+render.render(thread)
+assert_eq(vim.bo[bufnr].modifiable, true, "completed chat buffer is editable")
+assert(thread.prompt_start ~= nil, "completed render restores prompt")
+assert_eq(vim.api.nvim_win_get_cursor(sticky_win)[1], thread.prompt_start + 1, "sticky completed render returns cursor to prompt")
+
+thread.blocks = history_blocks("history", 18)
+thread.pending_request = nil
+thread.generation = "idle"
+thread.local_blocks = {}
+render.render(thread)
+local history_line_count = vim.api.nvim_buf_line_count(bufnr)
+restore_view(sticky_win, {
+  lnum = history_line_count - 8,
+  col = 0,
+  curswant = 0,
+  topline = math.max(1, history_line_count - vim.api.nvim_win_get_height(sticky_win) + 1),
+  leftcol = 0,
+  skipcol = 0,
+})
+render.on_user_view_changed(thread, sticky_win, "cursor")
+assert_eq(thread.view_state[sticky_win].follow, false, "cursor jump above bottom suspends sticky")
+restore_view(sticky_win, { lnum = 6, col = 0, curswant = 0, topline = 6, leftcol = 0, skipcol = 0 })
+render.on_user_view_changed(thread, sticky_win, "cursor")
+local history_view = save_view(sticky_win)
+thread.pending_request = { spec = spec, payload = payload, created_at = 3 }
+thread.generation = "streaming"
+thread.local_blocks = {
+  { type = "UserBlock", text = "follow-up", local_only = true },
+  { type = "AssistantBlock", text = "streaming\nnew\ncontent", state = "streaming", local_only = true },
+}
+render.render(thread)
+local restored_history_view = save_view(sticky_win)
+assert_eq(restored_history_view.lnum, history_view.lnum, "non-sticky render preserves cursor")
+assert_eq(restored_history_view.topline, history_view.topline, "non-sticky render preserves viewport")
+vim.api.nvim_win_set_cursor(sticky_win, { vim.api.nvim_buf_line_count(bufnr), 0 })
+render.on_user_view_changed(thread, sticky_win, "cursor")
+thread.local_blocks[2].text = "streaming\nnew\ncontent\nresumed"
+render.render(thread)
+assert_near_bottom(sticky_win, bufnr, "sticky resumes after returning bottom")
+
+local multi_thread = state.get_thread("validate-window-thread", { cwd = root })
+local multi_bufnr = vim.api.nvim_create_buf(false, true)
+state.bind_buffer(multi_thread, multi_bufnr)
+multi_thread.blocks = history_blocks("multi", 18)
+multi_thread.pending_request = nil
+multi_thread.generation = "idle"
+multi_thread.local_blocks = {}
+vim.api.nvim_set_current_buf(multi_bufnr)
+render.render(multi_thread)
+local follow_win = vim.api.nvim_get_current_win()
+vim.cmd("vsplit")
+local history_win = vim.api.nvim_get_current_win()
+vim.api.nvim_win_set_buf(history_win, multi_bufnr)
+local multi_line_count = vim.api.nvim_buf_line_count(multi_bufnr)
+vim.api.nvim_win_set_cursor(follow_win, { multi_line_count, 0 })
+render.on_user_view_changed(multi_thread, follow_win, "cursor")
+restore_view(history_win, { lnum = 6, col = 0, curswant = 0, topline = 6, leftcol = 0, skipcol = 0 })
+render.on_user_view_changed(multi_thread, history_win, "cursor")
+local multi_history_view = save_view(history_win)
+multi_thread.pending_request = { spec = spec, payload = payload, created_at = 4 }
+multi_thread.generation = "streaming"
+multi_thread.local_blocks = {
+  { type = "UserBlock", text = "multi follow-up", local_only = true },
+  { type = "AssistantBlock", text = "multi\nstream\ncontent", state = "streaming", local_only = true },
+}
+render.render(multi_thread)
+assert_near_bottom(follow_win, multi_bufnr, "multi-window sticky render")
+local multi_history_after = save_view(history_win)
+assert_eq(multi_history_after.lnum, multi_history_view.lnum, "multi-window history cursor preserved")
+assert_eq(multi_history_after.topline, multi_history_view.topline, "multi-window history viewport preserved")
+pcall(vim.api.nvim_win_close, history_win, true)
 
 print("alma.nvim validation OK")
 vim.cmd("qa")
