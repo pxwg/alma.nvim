@@ -9,6 +9,40 @@ local static_commands = {
   ["/rename"] = true,
 }
 
+local function inherit_request_selection(value)
+  if type(value) == "table" then
+    return vim.deepcopy(value)
+  end
+  if type(value) == "string" and value ~= "" then
+    return value
+  end
+  return {}
+end
+
+local function add_request_selection(spec, key, value)
+  if type(spec[key]) ~= "table" then
+    spec[key] = {}
+  end
+  table.insert(spec[key], value)
+end
+
+local function dedup_request_selection(value)
+  if type(value) == "table" then
+    return util.dedup(value)
+  end
+  if type(value) == "string" and value ~= "" then
+    return value
+  end
+  return {}
+end
+
+local function has_request_selection(value)
+  if type(value) == "table" then
+    return #value > 0
+  end
+  return type(value) == "string" and value ~= ""
+end
+
 local function current_metadata(thread)
   local bufnr = vim.api.nvim_get_current_buf()
   return {
@@ -72,7 +106,7 @@ local function parse_token(token, spec)
     end
     local skill = token:match("^/skill:(.+)$")
     if skill then
-      table.insert(spec.skills, skill)
+      add_request_selection(spec, "skills", skill)
       return true
     end
     return false
@@ -81,7 +115,7 @@ local function parse_token(token, spec)
   if token:sub(1, 1) == "@" then
     local mcp = token:match("^@mcp:(.+)$")
     if mcp then
-      table.insert(spec.mcp_servers, mcp)
+      add_request_selection(spec, "mcp_servers", mcp)
       return true
     end
     local group = token:match("^@group:(.+)$")
@@ -89,7 +123,7 @@ local function parse_token(token, spec)
       table.insert(spec.tool_groups, group)
       return true
     end
-    table.insert(spec.tools, token:sub(2))
+    add_request_selection(spec, "tools", token:sub(2))
     return true
   end
 
@@ -137,10 +171,10 @@ function M.parse_input(lines, thread)
     cwd = thread and thread.cwd or config.resolve_cwd(0),
     prompt = nil,
     command = nil,
-    skills = vim.deepcopy(thread and thread.config.skills or {}),
-    tools = vim.deepcopy(thread and thread.config.tools or {}),
+    skills = inherit_request_selection(thread and thread.config.skills or {}),
+    tools = inherit_request_selection(thread and thread.config.tools or {}),
     tool_groups = {},
-    mcp_servers = vim.deepcopy(thread and thread.config.mcp_servers or {}),
+    mcp_servers = inherit_request_selection(thread and thread.config.mcp_servers or {}),
     model = thread and thread.config.model or nil,
     model_override = false,
     reasoning_effort = thread and thread.config.reasoning_effort or nil,
@@ -170,9 +204,9 @@ function M.parse_input(lines, thread)
   end
 
   spec.prompt = util.trim(table.concat(prompt_lines, "\n"))
-  spec.skills = util.dedup(spec.skills)
-  spec.tools = util.dedup(spec.tools)
-  spec.mcp_servers = util.dedup(spec.mcp_servers)
+  spec.skills = dedup_request_selection(spec.skills)
+  spec.tools = dedup_request_selection(spec.tools)
+  spec.mcp_servers = dedup_request_selection(spec.mcp_servers)
 
   local effective_model = spec.model or (thread and thread.config.model) or nil
   local effective_reasoning = spec.reasoning_effort or (thread and thread.config.reasoning_effort) or nil
@@ -213,7 +247,7 @@ function M.compile_request(thread, spec)
     },
   }
 
-  if #spec.skills > 0 then
+  if has_request_selection(spec.skills) then
     -- Alma's observed handler does not document this field, but keeping it
     -- in metadata and the payload preserves per-request intent.
     payload.data.skillIds = spec.skills

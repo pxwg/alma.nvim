@@ -97,6 +97,19 @@ assert_eq(payload.data.model, "test-model", "compiled request model")
 assert_eq(payload.data.ephemeralModel, "test-model", "compiled ephemeral model")
 assert_eq(payload.data.userMessageMetadata.model, "test-model", "compiled model metadata")
 
+local auto_thread = state.get_thread("validate-auto-thread", { cwd = root })
+auto_thread.config.tools = "__auto__"
+auto_thread.config.skills = "__auto_skill__"
+local auto_spec = parser.parse_input({ "hello auto" }, auto_thread)
+assert_eq(auto_spec.tools, "__auto__", "parser preserves auto tools sentinel")
+assert_eq(auto_spec.skills, "__auto_skill__", "parser preserves auto skills sentinel")
+local auto_payload = parser.compile_request(auto_thread, auto_spec)
+assert_eq(auto_payload.data.tools, "__auto__", "compiled payload preserves auto tools sentinel")
+assert_eq(auto_payload.data.skillIds, "__auto_skill__", "compiled payload preserves auto skills sentinel")
+local explicit_spec = parser.parse_input({ "@Bash", "/skill:test-skill", "hello explicit" }, auto_thread)
+assert_eq(explicit_spec.tools[1], "Bash", "explicit tool overrides auto tools sentinel")
+assert_eq(explicit_spec.skills[1], "test-skill", "explicit skill overrides auto skills sentinel")
+
 local normalized = events.normalize_ws_event({
   type = "text_delta",
   data = { threadId = "validate-thread", delta = "ok" },

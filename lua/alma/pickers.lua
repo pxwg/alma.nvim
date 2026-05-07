@@ -154,14 +154,17 @@ function M.models()
 end
 
 local function toggle(list, value)
+  if type(list) ~= "table" then
+    list = {}
+  end
   for index, item in ipairs(list) do
     if item == value then
       table.remove(list, index)
-      return false
+      return list, false
     end
   end
   table.insert(list, value)
-  return true
+  return list, true
 end
 
 local function pick_toggle(kind, title, target_field)
@@ -198,7 +201,8 @@ local function pick_toggle(kind, title, target_field)
       if value == "<server>" or value == "<id>" then
         return
       end
-      local enabled = toggle(thread.config[target_field], value)
+      local next_list, enabled = toggle(thread.config[target_field], value)
+      thread.config[target_field] = next_list
       util.notify((enabled and "Enabled " or "Disabled ") .. label .. " for Alma thread defaults")
       require("alma.ui.render").render(thread)
     end,
