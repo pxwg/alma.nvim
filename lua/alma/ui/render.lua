@@ -2,6 +2,7 @@ local config = require("alma.config")
 local events = require("alma.events")
 local metadata = require("alma.ui.metadata")
 local tokens = require("alma.ui.tokens")
+local tool_renderers = require("alma.ui.tool_renderers")
 local util = require("alma.util")
 
 local M = {}
@@ -12,8 +13,6 @@ local pending_render_timers = {}
 
 local foldable_types = {
   ReasoningBlock = true,
-  ToolCallBlock = true,
-  ToolOutputBlock = true,
   RawEventBlock = true,
   AgentTimelineBlock = true,
 }
@@ -61,12 +60,13 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, "AlmaHeaderMeta", { default = true, link = "Comment" })
   vim.api.nvim_set_hl(0, "AlmaHeaderSeparator", { default = true, link = "Comment" })
   vim.api.nvim_set_hl(0, "AlmaLoading", { default = true, link = "DiagnosticInfo" })
+  vim.api.nvim_set_hl(0, "AlmaSpinner", { default = true, link = "DiagnosticInfo" })
   vim.api.nvim_set_hl(0, "AlmaReasoningText", { default = true, link = "Comment" })
   vim.api.nvim_set_hl(0, "AlmaReasoningBorder", { default = true, link = "DiagnosticHint" })
   vim.api.nvim_set_hl(0, "AlmaComposerCommand", { default = true, link = "Statement" })
   vim.api.nvim_set_hl(0, "AlmaComposerMention", { default = true, link = "Identifier" })
   vim.api.nvim_set_hl(0, "AlmaComposerSelector", { default = true, link = "Constant" })
-  vim.api.nvim_set_hl(0, "AlmaStreamTool", { default = true, link = "DiagnosticInfo" })
+  vim.api.nvim_set_hl(0, "AlmaStreamTool", { default = true, link = "Comment" })
   vim.api.nvim_set_hl(0, "AlmaStreamTimeline", { default = true, link = "DiagnosticHint" })
   vim.api.nvim_set_hl(0, "AlmaStreamRaw", { default = true, link = "DiagnosticWarn" })
   vim.api.nvim_set_hl(0, "AlmaStreamSubAgent", { default = true, link = "DiagnosticOk" })
@@ -95,14 +95,13 @@ local function add_text(lines, value)
   end
 end
 
-local function stringify(value)
-  if value == nil then
-    return ""
-  end
-  if type(value) == "string" then
+local function truncate_display(value, limit)
+  value = tostring(value or "")
+  limit = limit or 96
+  if #value <= limit then
     return value
   end
-  return vim.inspect(value)
+  return value:sub(1, limit - 1) .. "…"
 end
 
 local function first_string(...)
@@ -220,15 +219,6 @@ local function stream_decoration_for_block(block)
   return stream_decoration_by_type[block.type]
 end
 
-local function is_long(text)
-  local opts = config.get()
-  if #text > opts.long_output_bytes then
-    return true
-  end
-  local _, count = text:gsub("\n", "")
-  return count + 1 > opts.long_output_lines
-end
-
 local function assistant_meta(thread, block)
   local request = block and block.local_only and thread.pending_request or nil
   return metadata.assistant_labels(thread, block, request)
@@ -298,6 +288,11 @@ local function mark_stream_decoration(thread, start_line, finish_line, decoratio
     hl_group = decoration.hl_group,
     block = block,
   })
+end
+
+local function mark_spinner(thread, line)
+  thread.spinner_marks = thread.spinner_marks or {}
+  table.insert(thread.spinner_marks, line)
 end
 
 local function chunks_width(chunks)
@@ -390,6 +385,21 @@ local function apply_stream_decoration_marks(thread, bufnr)
         virt_text = { { mark.marker, mark.hl_group } },
         virt_text_pos = "inline",
         priority = 1100,
+        strict = false,
+      })
+    end
+  end
+end
+
+local function apply_spinner_marks(thread, bufnr)
+  for _, lnum in ipairs(thread.spinner_marks or {}) do
+    local line = vim.api.nvim_buf_get_lines(bufnr, lnum - 1, lnum, false)[1] or ""
+    if line ~= "" then
+      vim.api.nvim_buf_set_extmark(bufnr, ns, lnum - 1, 0, {
+        end_col = #line,
+        hl_group = "AlmaSpinner",
+        hl_mode = "combine",
+        priority = 1000,
         strict = false,
       })
     end
@@ -497,34 +507,81 @@ local function apply_composer_token_marks(thread, bufnr)
   end
 end
 
-local function render_tool(thread, lines, block)
+local function tool_summary(block)
+  return tool_renderers.summary(block)
+end
+
+local function output_summary(block)
+  return tool_renderers.status(block)
+end
+
+local render_block
+local assistant_group_id
+
+local function tool_title(block)
   local title = "Tool: " .. tostring(block.tool or "unknown")
   if block.state then
     title = title .. " [" .. tostring(block.state) .. "]"
   end
+  local summary = truncate_display(tool_summary(block), 110)
+  if summary ~= "" then
+    title = title .. " — " .. summary
+  end
+  local out_summary = output_summary(block)
+  if out_summary then
+    title = title .. " (" .. out_summary .. ")"
+  end
+  return title
+end
+
+local function render_tool(thread, lines, block)
+  local title = tool_title(block)
   local line = add(lines, "### " .. title)
   mark_header(thread, line, "section", title, {}, block)
   if block.tool_call_id then
     add(lines, "tool_call_id: " .. tostring(block.tool_call_id))
   end
-  if block.input ~= nil then
-    add(lines, "input:")
-    add_text(lines, stringify(block.input))
-  end
-  if block.output ~= nil then
-    local output = stringify(block.output)
-    if is_long(output) then
-      add(lines, "output: [long output available with :AlmaToolDetails]")
-    else
-      add(lines, "output:")
-      add_text(lines, output)
-    end
-  elseif block.text and block.text ~= "" then
-    add_text(lines, block.text)
+  for _, rendered_line in ipairs(tool_renderers.render(block)) do
+    add(lines, rendered_line)
   end
 end
 
-local function render_block(thread, lines, block, opts)
+local function render_tool_run(thread, lines, blocks, index, group_id)
+  local run = {}
+  local cursor = index
+  while cursor <= #blocks and assistant_group_id(blocks[cursor]) == group_id and blocks[cursor].type == "ToolCallBlock" do
+    table.insert(run, blocks[cursor])
+    cursor = cursor + 1
+  end
+  if #run <= 1 then
+    render_block(thread, lines, blocks[index], { assistant_body = true })
+    return index + 1
+  end
+
+  local titles = {}
+  for _, block in ipairs(run) do
+    table.insert(titles, truncate_display(tostring(block.tool or "unknown") .. ": " .. tool_summary(block), 48))
+  end
+  local group_title = "Tools ×" .. tostring(#run) .. ": " .. table.concat(titles, "  |  ")
+  local start = #lines + 1
+  local line = add(lines, "### " .. group_title)
+  mark_header(thread, line, "section", group_title, {}, run[1])
+  thread.render_index[line] = run[1]
+  add(lines, "Grouped consecutive tool calls. Open the fold for details, or use :AlmaToolDetails on a tool block.")
+  add(lines, "")
+  for _, block in ipairs(run) do
+    local block_start = #lines + 1
+    render_tool(thread, lines, block)
+    for lnum = block_start, #lines do
+      thread.render_index[lnum] = block
+    end
+    add(lines, "")
+  end
+  table.insert(thread.folds, { start = start, finish = #lines })
+  return cursor
+end
+
+render_block = function(thread, lines, block, opts)
   opts = opts or {}
   local start = #lines + 1
   if block.type == "UserBlock" then
@@ -583,7 +640,7 @@ local function render_block(thread, lines, block, opts)
   add(lines, "")
 end
 
-local function assistant_group_id(block)
+assistant_group_id = function(block)
   if not block or not assistant_content_types[block.type] then
     return nil
   end
@@ -604,8 +661,12 @@ local function render_assistant_group(thread, lines, blocks, index)
   add(lines, "")
 
   while index <= #blocks and assistant_group_id(blocks[index]) == group_id do
-    render_block(thread, lines, blocks[index], { assistant_body = true })
-    index = index + 1
+    if blocks[index].type == "ToolCallBlock" then
+      index = render_tool_run(thread, lines, blocks, index, group_id)
+    else
+      render_block(thread, lines, blocks[index], { assistant_body = true })
+      index = index + 1
+    end
   end
   return index
 end
@@ -621,22 +682,43 @@ local function existing_prompt(thread)
   return { "" }
 end
 
+local spinner_frames = {
+  "▰▱▱▱▱",
+  "▰▰▱▱▱",
+  "▰▰▰▱▱",
+  "▰▰▰▰▱",
+  "▰▰▰▰▰",
+  "▱▰▰▰▰",
+  "▱▱▰▰▰",
+  "▱▱▱▰▰",
+  "▱▱▱▱▰",
+}
+
+local busy_generations = {
+  submitted = true,
+  waiting_backend = true,
+  streaming = true,
+  tool_running = true,
+  reconciling = true,
+  cancelling = true,
+}
+
+local function thread_busy(thread)
+  return thread and (thread.backend_generating or busy_generations[thread.generation] == true)
+end
+
+local function spinner_line(thread)
+  local index = (math.floor(util.now_ms() / 140) % #spinner_frames) + 1
+  local label = thread.generation == "tool_running" and "tooling"
+    or thread.generation == "waiting_backend" and "waiting"
+    or thread.generation == "reconciling" and "syncing"
+    or thread.generation == "cancelling" and "stopping"
+    or "streaming"
+  return spinner_frames[index] .. "  Alma " .. label
+end
+
 local function header(thread)
-  local parts = {
-    "# Alma: " .. tostring(thread.title or thread.id),
-    "thread: " .. tostring(thread.id),
-    "cwd: " .. tostring(thread.cwd or ""),
-    "transport: " .. tostring(thread.transport),
-    "generation: " .. tostring(thread.generation),
-    "sync: " .. tostring(thread.sync),
-  }
-  if thread.status_message then
-    table.insert(parts, "status: " .. tostring(thread.status_message))
-  end
-  if thread.last_error then
-    table.insert(parts, "last_error: " .. tostring(thread.last_error))
-  end
-  return parts
+  return { "# Alma: " .. tostring(thread.title or thread.id) }
 end
 
 local function ensure_view_state(thread)
@@ -811,30 +893,69 @@ function M.on_user_view_changed(thread, win, source)
   state.suspended_by_user = not follow
 end
 
+local function capture_prompt_anchor(thread, win)
+  if not thread.prompt_start then
+    return nil
+  end
+  local info = window_info(win)
+  if not info then
+    return nil
+  end
+  local top = info.topline or 1
+  local bottom = info.botline or top + vim.api.nvim_win_get_height(win) - 1
+  local prompt_line = thread.prompt_start
+  if prompt_line < top or prompt_line > bottom then
+    return nil
+  end
+  local ok, cursor = pcall(vim.api.nvim_win_get_cursor, win)
+  cursor = ok and cursor or { prompt_line + 1, 0 }
+  return {
+    prompt_row = prompt_line - top,
+    cursor_delta = cursor[1] - prompt_line,
+    cursor_col = cursor[2] or 0,
+  }
+end
+
+local function restore_prompt_anchor(thread, win, snapshot)
+  if not snapshot or not snapshot.prompt_anchor or not thread.prompt_start then
+    restore_window_view(thread, win, snapshot)
+    return
+  end
+  local bufnr = thread.bufnr
+  if not valid_window_for_buffer(win, bufnr) then
+    return
+  end
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  local anchor = snapshot.prompt_anchor
+  local view = vim.deepcopy(snapshot.view or {})
+  local lnum = clamp_lnum(thread.prompt_start + anchor.cursor_delta, line_count)
+  local col = line_col(bufnr, lnum, anchor.cursor_col)
+  view.lnum = lnum
+  view.col = col
+  view.curswant = col
+  view.topline = clamp_lnum(thread.prompt_start - anchor.prompt_row, line_count)
+  view.leftcol = view.leftcol or 0
+  view.skipcol = view.skipcol or 0
+  with_programmatic_view(thread, win, function()
+    vim.api.nvim_win_set_cursor(win, { lnum, col })
+    vim.api.nvim_win_call(win, function()
+      vim.fn.winrestview(view)
+    end)
+    vim.api.nvim_win_set_cursor(win, { lnum, col })
+  end)
+end
+
 local function capture_window_views(thread, bufnr)
   local snapshots = {}
   for _, win in ipairs(vim.fn.win_findbuf(bufnr)) do
     if valid_window_for_buffer(win, bufnr) then
+      local prompt_anchor = capture_prompt_anchor(thread, win)
       local state = view_state_for_win(thread, win)
-      local near_bottom = M.window_near_bottom(thread, win)
-      if state.suspended_by_user and cursor_near_bottom(thread, win) then
-        state.follow = true
-        state.suspended_by_user = false
-      elseif state.suspended_by_user then
-        state.follow = false
-      elseif near_bottom then
-        state.follow = true
-        state.suspended_by_user = false
-      elseif state.follow == true then
-        state.follow = false
-        state.suspended_by_user = true
-      elseif state.follow == nil then
-        state.follow = false
-        state.suspended_by_user = true
-      end
+      state.follow = prompt_anchor ~= nil
+      state.suspended_by_user = prompt_anchor == nil
       snapshots[win] = {
         view = save_window_view(win),
-        follow = state.follow == true and state.suspended_by_user ~= true,
+        prompt_anchor = prompt_anchor,
       }
     end
   end
@@ -845,13 +966,9 @@ local function apply_window_views(thread, bufnr, snapshots)
   for _, win in ipairs(vim.fn.win_findbuf(bufnr)) do
     if valid_window_for_buffer(win, bufnr) then
       local snapshot = snapshots[win]
-      vim.wo[win].foldmethod = "expr"
-      vim.wo[win].foldexpr = "v:lua.AlmaFoldExpr(v:lnum)"
-      vim.wo[win].foldlevel = 0
-      vim.wo[win].wrap = true
-      vim.wo[win].conceallevel = math.max(vim.wo[win].conceallevel, 1)
-      if snapshot and snapshot.follow then
-        anchor_follow_window(thread, win)
+      require("alma.buffers").apply_window_options(win, bufnr)
+      if snapshot and snapshot.prompt_anchor then
+        restore_prompt_anchor(thread, win, snapshot)
       elseif snapshot then
         restore_window_view(thread, win, snapshot)
       end
@@ -905,7 +1022,10 @@ end
 
 local function replace_buffer_lines(bufnr, lines)
   local fold_snapshots = suspend_window_folds(bufnr)
+  local previous_undolevels = vim.bo[bufnr].undolevels
+  vim.bo[bufnr].undolevels = -1
   local ok, err = pcall(vim.api.nvim_buf_set_lines, bufnr, 0, -1, false, lines)
+  vim.bo[bufnr].undolevels = previous_undolevels
   restore_suspended_folds(fold_snapshots)
   if not ok then
     error(err)
@@ -945,6 +1065,7 @@ function M.render(thread)
   thread.header_marks = {}
   thread.reasoning_marks = {}
   thread.stream_decoration_marks = {}
+  thread.spinner_marks = {}
   thread.composer_token_marks = {}
   thread.folds = {}
   thread.fold_levels = {}
@@ -966,6 +1087,12 @@ function M.render(thread)
     end
   end
 
+  if thread_busy(thread) then
+    local line = add(lines, spinner_line(thread))
+    mark_spinner(thread, line)
+    add(lines, "")
+  end
+
   local line = add(lines, config.get().render.prompt_marker)
   mark_header(thread, line, "user", "You", composer_meta(thread), nil)
   local prompt_start = #lines
@@ -981,6 +1108,7 @@ function M.render(thread)
   apply_header_marks(thread, bufnr)
   apply_reasoning_marks(thread, bufnr)
   apply_stream_decoration_marks(thread, bufnr)
+  apply_spinner_marks(thread, bufnr)
   apply_composer_token_marks(thread, bufnr)
   vim.bo[bufnr].modifiable = true
 
@@ -999,6 +1127,9 @@ function M.render(thread)
 
   apply_window_views(thread, bufnr, snapshots)
   prune_view_states(thread, bufnr)
+  if thread_busy(thread) then
+    M.schedule(thread, 140)
+  end
 end
 
 function M.schedule(thread, delay)
