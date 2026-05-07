@@ -57,6 +57,54 @@ local function message_text(message)
   return util.trim(table.concat(text_parts, "\n"))
 end
 
+local function first_string(...)
+  for index = 1, select("#", ...) do
+    local value = select(index, ...)
+    if type(value) == "string" and value ~= "" then
+      return value
+    end
+  end
+  return ""
+end
+
+local function stream_delta_kind(delta)
+  local delta_type = delta.type or ""
+  local part_type = delta.partType or delta.part_type or delta.part and delta.part.type or ""
+  if delta_type == "reasoning_delta" or delta_type == "reasoning-delta" or delta_type == "reasoning_append" then
+    return "reasoning"
+  end
+  if delta_type == "text_append" or delta_type == "text_delta" then
+    if part_type == "reasoning" or part_type == "reasoning-delta" then
+      return "reasoning"
+    end
+    if part_type == "" or part_type == "text" then
+      return "text"
+    end
+  end
+  return nil
+end
+
+local function stream_delta_chunks(data, event_name)
+  data = data or {}
+  local chunks = { text = {}, reasoning = {} }
+  local direct = first_string(data.delta, data.text, data.content)
+  if direct ~= "" then
+    local kind = event_name == "reasoning-delta" and "reasoning" or "text"
+    table.insert(chunks[kind], direct)
+  end
+
+  for _, delta in ipairs(data.deltas or {}) do
+    local kind = stream_delta_kind(delta)
+    if kind then
+      local text = first_string(delta.text, delta.delta, delta.content, delta.value)
+      if text ~= "" then
+        table.insert(chunks[kind], text)
+      end
+    end
+  end
+  return table.concat(chunks.text), table.concat(chunks.reasoning)
+end
+
 local function has_persisted_user_prompt(thread, request)
   local prompt = util.trim(request.spec.prompt)
   if prompt == "" then
@@ -79,12 +127,33 @@ local function active_blocks(thread, request)
   if not has_persisted_user_prompt(thread, request) then
     table.insert(blocks, request_user_block(request))
   end
-  table.insert(blocks, {
-    type = "AssistantBlock",
-    text = thread.streaming_text ~= nil and thread.streaming_text or "⏳ Alma is thinking...",
-    state = thread.streaming_text and "streaming" or "loading",
-    local_only = true,
-  })
+  local has_stream = false
+  if thread.streaming_reasoning_text and thread.streaming_reasoning_text ~= "" then
+    table.insert(blocks, {
+      type = "ReasoningBlock",
+      text = thread.streaming_reasoning_text,
+      state = "streaming",
+      local_only = true,
+    })
+    has_stream = true
+  end
+  if thread.streaming_text and thread.streaming_text ~= "" then
+    table.insert(blocks, {
+      type = "AssistantBlock",
+      text = thread.streaming_text,
+      state = "streaming",
+      local_only = true,
+    })
+    has_stream = true
+  end
+  if not has_stream then
+    table.insert(blocks, {
+      type = "AssistantBlock",
+      text = "⏳ Alma is thinking...",
+      state = "loading",
+      local_only = true,
+    })
+  end
   return blocks
 end
 
@@ -121,6 +190,7 @@ local function start_request(thread, request, effects)
   thread.sync = "dirty"
   thread.pending_request = request
   thread.streaming_text = nil
+  thread.streaming_reasoning_text = nil
   thread.status_message = "Alma is thinking..."
   thread.last_error = nil
   thread.prompt_lines = { "" }
@@ -248,6 +318,7 @@ function M.reduce_thread(thread, event)
       thread.generation = "idle"
       thread.pending_request = nil
       thread.streaming_text = nil
+      thread.streaming_reasoning_text = nil
       thread.status_message = nil
     end
     rebuild_local_blocks(thread)
@@ -313,14 +384,16 @@ function M.reduce_thread(thread, event)
     elseif event.name == "context_usage_update" then
       thread.context_usage = event.data
       table.insert(effects, { type = "render", thread_id = thread.id })
-    elseif event.name == "text_delta" or event.name == "message_delta" then
+    elseif event.name == "text_delta" or event.name == "message_delta" or event.name == "reasoning-delta" then
       thread.generation = "streaming"
-      local delta = event.data.delta or event.data.text or event.data.content
-      if type(delta) == "string" and delta ~= "" and thread.pending_request then
-        if thread.streaming_text == nil or thread.streaming_text == "⏳ Alma is thinking..." then
-          thread.streaming_text = ""
+      local text_delta, reasoning_delta = stream_delta_chunks(event.data, event.name)
+      if thread.pending_request and (text_delta ~= "" or reasoning_delta ~= "") then
+        if reasoning_delta ~= "" then
+          thread.streaming_reasoning_text = (thread.streaming_reasoning_text or "") .. reasoning_delta
         end
-        thread.streaming_text = (thread.streaming_text or "") .. delta
+        if text_delta ~= "" then
+          thread.streaming_text = (thread.streaming_text or "") .. text_delta
+        end
         rebuild_local_blocks(thread)
       end
       table.insert(effects, { type = "render", thread_id = thread.id })

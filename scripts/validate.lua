@@ -283,6 +283,55 @@ thread.backend_generating = false
 thread.queue = {}
 thread.local_blocks = {}
 thread.generation = "idle"
+thread.pending_request = { spec = spec, payload = payload, created_at = 2 }
+thread.streaming_text = nil
+thread.streaming_reasoning_text = nil
+local _, stream_effects = core.reduce_thread(thread, {
+  type = "ws_event",
+  name = "message_delta",
+  known = true,
+  data = {
+    threadId = "validate-thread",
+    deltas = {
+      { type = "tool_input_append", text = "ignored tool text" },
+      { type = "text_append", partType = "text", text = "stream" },
+      { type = "text_append", partType = "text", text = "ing" },
+      { type = "text_done", partType = "text" },
+    },
+  },
+})
+assert_eq(thread.streaming_text, "streaming", "message_delta array streams text chunks")
+assert_eq(thread.local_blocks[2].type, "AssistantBlock", "message_delta text uses assistant block")
+assert_eq(thread.local_blocks[2].text, "streaming", "message_delta array rebuilds streaming block")
+assert_eq(stream_effects[2].type, "render", "message_delta renders streaming update")
+thread.streaming_text = nil
+thread.streaming_reasoning_text = nil
+thread.local_blocks = {}
+local _, reasoning_stream_effects = core.reduce_thread(thread, {
+  type = "ws_event",
+  name = "message_delta",
+  known = true,
+  data = {
+    threadId = "validate-thread",
+    deltas = {
+      { type = "text_append", partType = "reasoning", text = "think" },
+      { type = "text_append", partType = "reasoning", text = "ing" },
+      { type = "text_append", partType = "text", text = "answer" },
+    },
+  },
+})
+assert_eq(thread.streaming_reasoning_text, "thinking", "message_delta array streams reasoning chunks")
+assert_eq(thread.streaming_text, "answer", "message_delta array keeps answer chunks separate")
+assert_eq(thread.local_blocks[2].type, "ReasoningBlock", "streaming reasoning uses reasoning block")
+assert_eq(thread.local_blocks[2].text, "thinking", "streaming reasoning block has cot text")
+assert_eq(thread.local_blocks[3].type, "AssistantBlock", "streaming answer remains assistant block")
+assert_eq(thread.local_blocks[3].text, "answer", "streaming answer block has answer text")
+assert_eq(reasoning_stream_effects[2].type, "render", "reasoning message_delta renders streaming update")
+thread.pending_request = nil
+thread.streaming_text = nil
+thread.streaming_reasoning_text = nil
+thread.local_blocks = {}
+thread.generation = "idle"
 
 local bufnr = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_set_current_buf(bufnr)
@@ -320,6 +369,23 @@ for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, render_ns, 0, -1, { d
   end
 end
 assert(overlay_width_ok, "header overlay covers current window width")
+local reasoning_line = positions["thinking first"]
+assert(reasoning_line, "reasoning body line rendered")
+local reasoning_text_ok = false
+local reasoning_border_ok = false
+for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, render_ns, 0, -1, { details = true })) do
+  local details = mark[4] or {}
+  if mark[2] + 1 == reasoning_line then
+    reasoning_text_ok = reasoning_text_ok or details.hl_group == "AlmaReasoningText"
+    if details.virt_text_pos == "inline" and details.virt_text then
+      for _, chunk in ipairs(details.virt_text) do
+        reasoning_border_ok = reasoning_border_ok or chunk[2] == "AlmaReasoningBorder"
+      end
+    end
+  end
+end
+assert(reasoning_text_ok, "reasoning body uses muted text highlight")
+assert(reasoning_border_ok, "reasoning body uses inline border marker")
 assert_eq(vim.bo[bufnr].modifiable, true, "idle chat buffer is editable")
 thread.last_error = nil
 

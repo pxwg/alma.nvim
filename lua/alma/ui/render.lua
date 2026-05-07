@@ -32,6 +32,8 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, "AlmaHeaderMeta", { default = true, link = "Comment" })
   vim.api.nvim_set_hl(0, "AlmaHeaderSeparator", { default = true, link = "Comment" })
   vim.api.nvim_set_hl(0, "AlmaLoading", { default = true, link = "DiagnosticInfo" })
+  vim.api.nvim_set_hl(0, "AlmaReasoningText", { default = true, link = "Comment" })
+  vim.api.nvim_set_hl(0, "AlmaReasoningBorder", { default = true, link = "DiagnosticHint" })
 end
 
 local function add(lines, value)
@@ -143,6 +145,16 @@ local function mark_header(thread, line, kind, title, meta, block)
   })
 end
 
+local function mark_reasoning_lines(thread, start_line, finish_line)
+  if finish_line < start_line then
+    return
+  end
+  table.insert(thread.reasoning_marks, {
+    start_line = start_line,
+    finish_line = finish_line,
+  })
+end
+
 local function chunks_width(chunks)
   local width = 0
   for _, chunk in ipairs(chunks or {}) do
@@ -203,6 +215,29 @@ local function apply_header_marks(thread, bufnr)
   end
 end
 
+local function apply_reasoning_marks(thread, bufnr)
+  for _, mark in ipairs(thread.reasoning_marks or {}) do
+    for lnum = mark.start_line, mark.finish_line do
+      local line = vim.api.nvim_buf_get_lines(bufnr, lnum - 1, lnum, false)[1] or ""
+      vim.api.nvim_buf_set_extmark(bufnr, ns, lnum - 1, 0, {
+        virt_text = { { "▏ ", "AlmaReasoningBorder" } },
+        virt_text_pos = "inline",
+        priority = 1200,
+        strict = false,
+      })
+      if line ~= "" then
+        vim.api.nvim_buf_set_extmark(bufnr, ns, lnum - 1, 0, {
+          end_col = #line,
+          hl_group = "AlmaReasoningText",
+          hl_mode = "combine",
+          priority = 900,
+          strict = false,
+        })
+      end
+    end
+  end
+end
+
 local function render_tool(thread, lines, block)
   local title = "Tool: " .. tostring(block.tool or "unknown")
   if block.state then
@@ -256,7 +291,9 @@ local function render_block(thread, lines, block, opts)
     local title = "Reasoning" .. (block.state and (" [" .. block.state .. "]") or "")
     local line = add(lines, "### " .. title)
     mark_header(thread, line, "section", title, {}, block)
+    local body_start = #lines + 1
     add_text(lines, events.block_text(block))
+    mark_reasoning_lines(thread, body_start, #lines)
   elseif block.type == "ToolCallBlock" then
     render_tool(thread, lines, block)
   elseif block.type == "AgentTimelineBlock" then
@@ -615,6 +652,7 @@ function M.render(thread)
   thread.prompt_lines = nil
   thread.render_index = {}
   thread.header_marks = {}
+  thread.reasoning_marks = {}
   thread.folds = {}
 
   local lines = {}
@@ -650,6 +688,7 @@ function M.render(thread)
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
   apply_header_marks(thread, bufnr)
+  apply_reasoning_marks(thread, bufnr)
   vim.bo[bufnr].modifiable = not locked
 
   local virt = {

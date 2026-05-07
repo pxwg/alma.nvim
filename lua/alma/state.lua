@@ -43,6 +43,8 @@ local function default_thread(id, opts)
     view_state = {},
     context_usage = nil,
     pending_request = nil,
+    streaming_text = nil,
+    streaming_reasoning_text = nil,
     active_assistant_message_id = nil,
     backend_generating = false,
     last_event_at = nil,
