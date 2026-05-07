@@ -119,38 +119,51 @@ local function start_timer(thread_id, name, delay)
   end)
 end
 
+local function run_one(effect)
+  if effect.type == "ws_send" then
+    M.send_ws(effect.thread_id, effect.payload)
+  elseif effect.type == "rest_fetch_thread" then
+    rest.thread(effect.thread_id, function(data, err)
+      if data then
+        dispatch(effect.thread_id, { type = "rest_thread_loaded", thread = data })
+      else
+        dispatch(effect.thread_id, { type = "rest_error", error = err })
+      end
+    end)
+  elseif effect.type == "rest_fetch_messages" then
+    rest.messages(effect.thread_id, function(data, err)
+      if data then
+        dispatch(effect.thread_id, { type = "rest_messages_loaded", messages = data })
+      else
+        dispatch(effect.thread_id, { type = "rest_error", error = err })
+      end
+    end)
+  elseif effect.type == "start_timer" then
+    start_timer(effect.thread_id, effect.name, effect.delay)
+  elseif effect.type == "stop_timer" then
+    stop_timer(effect.thread_id, effect.name)
+  elseif effect.type == "render" then
+    require("alma.ui.render").schedule(get_thread(effect.thread_id))
+  elseif effect.type == "append_event_log" then
+    state.append_event(effect.thread_id, effect.event)
+  elseif effect.type == "notify" then
+    util.notify(effect.message, effect.level)
+  elseif effect.type == "dispatch" then
+    dispatch(effect.thread_id, effect.event)
+  end
+end
+
 function M.run(effects)
   for _, effect in ipairs(effects or {}) do
-    if effect.type == "ws_send" then
-      M.send_ws(effect.thread_id, effect.payload)
-    elseif effect.type == "rest_fetch_thread" then
-      rest.thread(effect.thread_id, function(data, err)
-        if data then
-          dispatch(effect.thread_id, { type = "rest_thread_loaded", thread = data })
-        else
-          dispatch(effect.thread_id, { type = "rest_error", error = err })
-        end
-      end)
-    elseif effect.type == "rest_fetch_messages" then
-      rest.messages(effect.thread_id, function(data, err)
-        if data then
-          dispatch(effect.thread_id, { type = "rest_messages_loaded", messages = data })
-        else
-          dispatch(effect.thread_id, { type = "rest_error", error = err })
-        end
-      end)
-    elseif effect.type == "start_timer" then
-      start_timer(effect.thread_id, effect.name, effect.delay)
-    elseif effect.type == "stop_timer" then
-      stop_timer(effect.thread_id, effect.name)
-    elseif effect.type == "render" then
-      require("alma.ui.render").schedule(get_thread(effect.thread_id))
-    elseif effect.type == "append_event_log" then
-      state.append_event(effect.thread_id, effect.event)
-    elseif effect.type == "notify" then
-      util.notify(effect.message, effect.level)
-    elseif effect.type == "dispatch" then
-      dispatch(effect.thread_id, effect.event)
+    local ok, err = pcall(run_one, effect)
+    if not ok then
+      local thread = effect.thread_id and get_thread(effect.thread_id) or nil
+      if thread then
+        thread.last_error = err
+        thread.status_message = "Neovim effect failed; state was kept alive."
+        require("alma.ui.render").schedule(thread, 0)
+      end
+      util.notify("Alma effect failed: " .. tostring(err), vim.log.levels.ERROR)
     end
   end
 end

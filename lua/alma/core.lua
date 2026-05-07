@@ -32,7 +32,7 @@ end
 local function request_user_block(request)
   return request_metadata.apply_to_block({
     type = "UserBlock",
-    text = request.spec.prompt,
+    text = request.spec.display_prompt or request.spec.prompt,
     local_only = true,
     metadata = request.spec.metadata,
     context_count = #(request.spec.ephemeral_context or {}),
@@ -301,6 +301,14 @@ local function apply_thread_metadata(thread, payload)
   thread.title = source.title or thread.title
   thread.workspace_id = source.workspaceId or source.workspace_id or thread.workspace_id
   thread.cwd = source.cwd or source.projectPath or source.workspacePath or thread.cwd
+  if source.workspace or source.workspacePath or source.projectPath then
+    local workspace = source.workspace or {}
+    thread.workspace = {
+      id = workspace.id or thread.workspace_id,
+      name = workspace.name or (thread.cwd and vim.fn.fnamemodify(thread.cwd, ":t")) or nil,
+      path = workspace.path or source.workspacePath or source.projectPath or thread.cwd,
+    }
+  end
   thread.config.workspace_id = thread.workspace_id
   thread.config.model = source.model or thread.config.model
   thread.config.reasoning_effort = source.reasoningEffort or source.reasoning_effort or thread.config.reasoning_effort

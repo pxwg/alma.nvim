@@ -199,9 +199,17 @@ end
 local function parts_text(parts)
   local text_parts = {}
   for _, part in ipairs(parts or {}) do
+    local typ = part.type or "text"
     local text = part_text(part)
     if text ~= "" then
       table.insert(text_parts, text)
+    elseif typ == "file" or typ == "image" then
+      local filename = first_text(part.filename, part.name, "image")
+      local url = first_text(part.path, part.url, part.uri, "attachment")
+      if url:match("^data:") then
+        url = "attachment"
+      end
+      table.insert(text_parts, "![" .. filename .. "](" .. url .. ")")
     end
   end
   return table.concat(text_parts, "\n")
@@ -296,15 +304,18 @@ local function block_from_message(item, index, context)
         raw = part,
       }, inherited_request_metadata))
     elseif typ == "step-start" then
-      flush_assistant_text()
-      table.insert(blocks, request_metadata.apply_to_block({
-        type = "AgentTimelineBlock",
-        message_id = id,
-        metadata = part_metadata(metadata, part),
-        title = first_text(part.title, part.label, part.id, "step-start"),
-        text = part_text(part),
-        raw = part,
-      }, inherited_request_metadata))
+      local text = part_text(part)
+      if text ~= "" then
+        flush_assistant_text()
+        table.insert(blocks, request_metadata.apply_to_block({
+          type = "AgentTimelineBlock",
+          message_id = id,
+          metadata = part_metadata(metadata, part),
+          title = first_text(part.title, part.label, part.id, "step-start"),
+          text = text,
+          raw = part,
+        }, inherited_request_metadata))
+      end
     elseif vim.startswith(typ, "tool-") then
       flush_assistant_text()
       table.insert(blocks, request_metadata.apply_to_block({

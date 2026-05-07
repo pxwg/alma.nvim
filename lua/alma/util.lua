@@ -113,6 +113,44 @@ function M.read_buf_text(bufnr, max_bytes)
   return text
 end
 
+local b64chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+function M.base64_encode(data)
+  data = tostring(data or "")
+  return ((data:gsub(".", function(x)
+    local bits = ""
+    local byte = x:byte()
+    for i = 8, 1, -1 do
+      bits = bits .. (byte % 2 ^ i - byte % 2 ^ (i - 1) > 0 and "1" or "0")
+    end
+    return bits
+  end) .. "0000"):gsub("%d%d%d?%d?%d?%d?", function(x)
+    if #x < 6 then
+      return ""
+    end
+    local c = 0
+    for i = 1, 6 do
+      c = c + (x:sub(i, i) == "1" and 2 ^ (6 - i) or 0)
+    end
+    return b64chars:sub(c + 1, c + 1)
+  end) .. ({ "", "==", "=" })[#data % 3 + 1])
+end
+
+function M.read_file_bytes(path)
+  local fd, open_err = vim.uv.fs_open(path, "r", 438)
+  if not fd then
+    return nil, open_err
+  end
+  local stat, stat_err = vim.uv.fs_fstat(fd)
+  if not stat then
+    vim.uv.fs_close(fd)
+    return nil, stat_err
+  end
+  local data, read_err = vim.uv.fs_read(fd, stat.size, 0)
+  vim.uv.fs_close(fd)
+  return data, read_err
+end
+
 function M.open_or_focus_buf(bufnr)
   for _, win in ipairs(vim.fn.win_findbuf(bufnr)) do
     if vim.api.nvim_win_is_valid(win) then

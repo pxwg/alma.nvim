@@ -47,11 +47,99 @@ end
 local function current_metadata(thread)
   local bufnr = vim.api.nvim_get_current_buf()
   return {
-    source = "alma.nvim",
+    source = "alma_nvim",
     bufnr = bufnr,
     cwd = thread and thread.cwd or config.resolve_cwd(bufnr),
+    workspaceId = thread and thread.workspace_id or nil,
     original_text = nil,
   }
+end
+
+local image_mime_by_ext = {
+  png = "image/png",
+  jpg = "image/jpeg",
+  jpeg = "image/jpeg",
+  webp = "image/webp",
+  gif = "image/gif",
+  bmp = "image/bmp",
+  tiff = "image/tiff",
+  tif = "image/tiff",
+  heic = "image/heic",
+}
+
+local function mime_for_path(path)
+  local ext = tostring(path or ""):match("%.([^.]+)$")
+  return ext and image_mime_by_ext[ext:lower()] or "application/octet-stream"
+end
+
+local function uri_decode(value)
+  return tostring(value or ""):gsub("%%(%x%x)", function(hex)
+    return string.char(tonumber(hex, 16))
+  end)
+end
+
+local function resolve_image_path(location, thread)
+  location = uri_decode(location)
+  if location:match("^file://") then
+    location = location:gsub("^file://", "")
+  end
+  if location:match("^/") then
+    return vim.fn.fnamemodify(location, ":p")
+  end
+  local base = thread and thread.cwd or config.resolve_cwd(0)
+  return vim.fn.fnamemodify(base .. "/" .. location, ":p")
+end
+
+local function image_part_from_markdown(alt, location, thread)
+  if location:match("^data:image/") then
+    local media_type, data = location:match("^data:([^;]+);base64,(.+)$")
+    if media_type and data then
+      return {
+        type = "file",
+        mediaType = media_type,
+        url = location,
+        filename = alt ~= "" and alt or "image.png",
+      }
+    end
+    return nil, "Unsupported data URI image: " .. location:sub(1, 32)
+  end
+  if location:match("^https?://") then
+    return {
+      type = "file",
+      mediaType = mime_for_path(location),
+      url = location,
+      filename = alt ~= "" and alt or vim.fn.fnamemodify(location, ":t"),
+    }
+  end
+
+  local path = resolve_image_path(location, thread)
+  local data, err = util.read_file_bytes(path)
+  if not data then
+    return nil, "Unable to read image " .. location .. ": " .. tostring(err)
+  end
+  local media_type = mime_for_path(path)
+  return {
+    type = "file",
+    mediaType = media_type,
+    url = "data:" .. media_type .. ";base64," .. util.base64_encode(data),
+    filename = alt ~= "" and alt or vim.fn.fnamemodify(path, ":t"),
+  }
+end
+
+local function extract_markdown_images(text, thread)
+  local images = {}
+  local warnings = {}
+  local display_text = text
+  local prompt_text = text:gsub("!%[([^%]]*)%]%(([^%)]+)%)", function(alt, location)
+    local part, err = image_part_from_markdown(alt, vim.trim(location), thread)
+    if part then
+      table.insert(images, part)
+      return ""
+    end
+    table.insert(warnings, err)
+    return "![" .. alt .. "](" .. location .. ")"
+  end)
+  return prompt_text, display_text, images, warnings
 end
 
 local function context_for_token(token)
@@ -139,6 +227,8 @@ function M.parse_input(lines, thread)
     temperature = nil,
     no_tools = false,
     ephemeral_context = {},
+    images = {},
+    display_prompt = nil,
     warnings = {},
     metadata = current_metadata(thread),
   }
@@ -160,7 +250,12 @@ function M.parse_input(lines, thread)
     end
   end
 
-  spec.prompt = util.trim(table.concat(prompt_lines, "\n"))
+  spec.display_prompt = util.trim(table.concat(prompt_lines, "\n"))
+  local prompt_without_images, display_prompt, images, image_warnings = extract_markdown_images(spec.display_prompt, thread)
+  spec.prompt = util.trim(prompt_without_images)
+  spec.display_prompt = display_prompt
+  spec.images = images
+  util.list_extend(spec.warnings, image_warnings)
   spec.skills = dedup_request_selection(spec.skills)
   spec.tools = dedup_request_selection(spec.tools)
   spec.mcp_servers = dedup_request_selection(spec.mcp_servers)
@@ -180,21 +275,26 @@ end
 function M.compile_request(thread, spec)
   local effective_model = spec.model or thread.config.model
   local effective_reasoning = spec.reasoning_effort or thread.config.reasoning_effort
+  local parts = {}
+  if spec.prompt ~= "" then
+    table.insert(parts, { type = "text", text = spec.prompt })
+  end
+  for _, image in ipairs(spec.images or {}) do
+    table.insert(parts, image)
+  end
   local payload = {
     type = "generate_response",
     data = {
       threadId = thread.id,
       userMessage = {
         role = "user",
-        parts = {
-          { type = "text", text = spec.prompt },
-        },
+        parts = parts,
       },
       model = effective_model,
       reasoningEffort = effective_reasoning,
       tools = payload_tool_selection(spec.tools),
       enabledMCPServerIds = spec.mcp_servers,
-      source = "alma.nvim",
+      source = "alma_nvim",
       noTools = spec.no_tools,
       ephemeralModel = spec.model_override and effective_model or vim.NIL,
       userMessageMetadata = spec.metadata,
