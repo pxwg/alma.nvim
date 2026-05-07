@@ -105,8 +105,10 @@ end
 local function assistant_meta(thread, block)
   local meta = {}
   local request = thread.pending_request
-  local model = request and request.spec and request.spec.model or thread.config.model
-  local reasoning = request and request.spec and request.spec.reasoning_effort or thread.config.reasoning_effort
+  local model = block and block.request_model or request and request.spec and request.spec.model or thread.config.model
+  local reasoning = block and block.request_reasoning_effort
+    or request and request.spec and request.spec.reasoning_effort
+    or thread.config.reasoning_effort
   local model_name = model_label(model)
   if model_name then
     table.insert(meta, model_name)

@@ -28,7 +28,7 @@ config.setup({ notify = false })
 
 local thread = state.get_thread("validate-thread", { cwd = root })
 local spec = parser.parse_input({
-  "$model:test-model",
+  "$model: test-model",
   "$reasoning:xhigh",
   "@Bash",
   ">diagnostics",
@@ -37,7 +37,10 @@ local spec = parser.parse_input({
 
 assert_eq(spec.prompt, "hello alma", "parser prompt")
 assert_eq(spec.model, "test-model", "parser model")
+assert_eq(spec.model_override, true, "parser model override")
+assert_eq(spec.metadata.requestModel, "test-model", "parser request model metadata")
 assert_eq(spec.reasoning_effort, "xhigh", "parser reasoning")
+assert_eq(spec.metadata.reasoningEffort, "xhigh", "parser reasoning metadata")
 assert_eq(spec.tools[1], "Bash", "parser tool")
 assert_eq(spec.ephemeral_context[1].type, "diagnostics", "parser context")
 
@@ -47,6 +50,9 @@ assert_eq(payload.data.threadId, "validate-thread", "compiled payload thread")
 assert_eq(payload.data.userMessage.role, "user", "compiled user message role")
 assert_eq(payload.data.userMessage.parts[1].type, "text", "compiled user message part type")
 assert_eq(payload.data.userMessage.parts[1].text, "hello alma", "compiled user message text")
+assert_eq(payload.data.model, "test-model", "compiled request model")
+assert_eq(payload.data.ephemeralModel, "test-model", "compiled ephemeral model")
+assert_eq(payload.data.userMessageMetadata.model, "test-model", "compiled model metadata")
 
 local normalized = events.normalize_ws_event({
   type = "text_delta",
@@ -85,6 +91,21 @@ assert_eq(blocks[3].type, "ToolCallBlock", "message tool block")
 
 local chronological_blocks = events.normalize_messages({
   {
+    id = "validate-thread--user-1",
+    message = {
+      id = "user-1",
+      role = "user",
+      parts = { { type = "text", text = "question" } },
+    },
+    metadata = {
+      original_text = "$model:test-model\n$reasoning:xhigh\nquestion",
+      modelOverride = true,
+      reasoningOverride = true,
+    },
+  },
+  {
+    id = "validate-thread--assistant-1",
+    parentId = "validate-thread--user-1",
     message = {
       id = "m2",
       role = "assistant",
@@ -96,10 +117,14 @@ local chronological_blocks = events.normalize_messages({
     },
   },
 })
-assert_eq(chronological_blocks[1].type, "AgentTimelineBlock", "chronological timeline block")
-assert_eq(chronological_blocks[1].title, "step-start", "timeline fallback title")
-assert_eq(chronological_blocks[2].type, "ReasoningBlock", "chronological reasoning block")
-assert_eq(chronological_blocks[3].type, "AssistantBlock", "chronological assistant block")
+assert_eq(chronological_blocks[1].type, "UserBlock", "chronological user block")
+assert_eq(chronological_blocks[2].type, "AgentTimelineBlock", "chronological timeline block")
+assert_eq(chronological_blocks[2].title, "step-start", "timeline fallback title")
+assert_eq(chronological_blocks[2].request_model, "test-model", "timeline inherits request model")
+assert_eq(chronological_blocks[3].type, "ReasoningBlock", "chronological reasoning block")
+assert_eq(chronological_blocks[3].request_reasoning_effort, "xhigh", "reasoning inherits request effort")
+assert_eq(chronological_blocks[4].type, "AssistantBlock", "chronological assistant block")
+assert_eq(chronological_blocks[4].request_model, "test-model", "assistant inherits request model")
 
 local nvim_user_blocks = events.normalize_messages({
   {

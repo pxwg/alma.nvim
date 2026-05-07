@@ -94,17 +94,19 @@ local function parse_token(token, spec)
   end
 
   if token:sub(1, 1) == "$" then
-    local model = token:match("^%$model:(.+)$")
+    local model = token:match("^%$model:%s*(.+)$")
     if model then
-      spec.model = model
+      spec.model = util.trim(model)
+      spec.model_override = true
       return true
     end
-    local reasoning = token:match("^%$reasoning:(.+)$")
+    local reasoning = token:match("^%$reasoning:%s*(.+)$")
     if reasoning then
-      spec.reasoning_effort = reasoning
+      spec.reasoning_effort = util.trim(reasoning)
+      spec.reasoning_override = true
       return true
     end
-    local temp = token:match("^%$temp:(.+)$")
+    local temp = token:match("^%$temp:%s*(.+)$")
     if temp then
       spec.temperature = tonumber(temp)
       return true
@@ -140,7 +142,9 @@ function M.parse_input(lines, thread)
     tool_groups = {},
     mcp_servers = vim.deepcopy(thread and thread.config.mcp_servers or {}),
     model = thread and thread.config.model or nil,
+    model_override = false,
     reasoning_effort = thread and thread.config.reasoning_effort or nil,
+    reasoning_override = false,
     temperature = nil,
     no_tools = false,
     ephemeral_context = {},
@@ -154,7 +158,7 @@ function M.parse_input(lines, thread)
 
   for _, line in ipairs(lines) do
     local trimmed = util.trim(line)
-    local token = trimmed:match("^([/@$>][^%s]+)$")
+    local token = trimmed:match("^([/@$>].*)$")
     if token then
       if not parse_token(token, spec) then
         table.insert(spec.warnings, "Unknown Alma token kept in prompt: " .. token)
@@ -169,10 +173,22 @@ function M.parse_input(lines, thread)
   spec.skills = util.dedup(spec.skills)
   spec.tools = util.dedup(spec.tools)
   spec.mcp_servers = util.dedup(spec.mcp_servers)
+
+  local effective_model = spec.model or (thread and thread.config.model) or nil
+  local effective_reasoning = spec.reasoning_effort or (thread and thread.config.reasoning_effort) or nil
+  spec.metadata.model = effective_model
+  spec.metadata.request_model = effective_model
+  spec.metadata.requestModel = effective_model
+  spec.metadata.modelOverride = spec.model_override
+  spec.metadata.reasoning_effort = effective_reasoning
+  spec.metadata.reasoningEffort = effective_reasoning
+  spec.metadata.reasoningOverride = spec.reasoning_override
   return spec
 end
 
 function M.compile_request(thread, spec)
+  local effective_model = spec.model or thread.config.model
+  local effective_reasoning = spec.reasoning_effort or thread.config.reasoning_effort
   local payload = {
     type = "generate_response",
     data = {
@@ -183,13 +199,13 @@ function M.compile_request(thread, spec)
           { type = "text", text = spec.prompt },
         },
       },
-      model = spec.model or thread.config.model,
-      reasoningEffort = spec.reasoning_effort or thread.config.reasoning_effort,
+      model = effective_model,
+      reasoningEffort = effective_reasoning,
       tools = spec.tools,
       enabledMCPServerIds = spec.mcp_servers,
       source = "alma.nvim",
       noTools = spec.no_tools,
-      ephemeralModel = spec.model,
+      ephemeralModel = spec.model_override and effective_model or vim.NIL,
       userMessageMetadata = spec.metadata,
       ephemeralContext = spec.ephemeral_context,
       fromQuickChat = false,
