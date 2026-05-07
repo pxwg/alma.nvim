@@ -33,6 +33,9 @@ luarocks make alma.nvim-scm-1.rockspec
 ## Commands
 
 - `:AlmaHealth` checks Neovim, `curl`, and the Alma API.
+- `:Alma open`, `:Alma toggle`, `:Alma float`, and `:Alma sidebar` open or hide
+  the current Alma thread in the default floating layout or a right sidebar.
+  Pass an optional thread id, for example `:Alma sidebar <thread_id>`.
 - `:AlmaThreadOpen <thread_id>` opens a thread buffer and fetches messages.
 - `:AlmaSubmit [prompt]` submits prompt text. Without arguments it submits the
   editable bottom `## You` composer in an Alma buffer.
@@ -103,5 +106,8 @@ Run a manual API check:
 
 ```vim
 :AlmaHealth
+:Alma open
+:Alma float <thread_id>
+:Alma sidebar <thread_id>
 :AlmaThreadOpen <thread_id>
 ```

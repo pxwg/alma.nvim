@@ -1,43 +1,10 @@
 local config = require("alma.config")
 local rest = require("alma.rest")
 local state = require("alma.state")
+local tokens = require("alma.ui.tokens")
 
 local M = {}
 local inflight = {}
-
-local static = {
-  slash = {
-    { label = "/new", detail = "Create a new Alma thread" },
-    { label = "/stop", detail = "Stop current generation" },
-    { label = "/rename", detail = "Rename current thread" },
-    { label = "/skill:<id>", detail = "Enable a skill for this request" },
-  },
-  at = {
-    { label = "@Bash", detail = "Enable Bash tool" },
-    { label = "@Read", detail = "Enable Read tool" },
-    { label = "@Grep", detail = "Enable Grep tool" },
-    { label = "@Glob", detail = "Enable Glob tool" },
-    { label = "@Task", detail = "Enable Task tool" },
-    { label = "@mcp:<server>", detail = "Enable an MCP server" },
-  },
-  dollar = {
-    { label = "$model:<id>", detail = "Set model for this request" },
-    { label = "$reasoning:low", detail = "Low reasoning effort" },
-    { label = "$reasoning:medium", detail = "Medium reasoning effort" },
-    { label = "$reasoning:high", detail = "High reasoning effort" },
-    { label = "$reasoning:xhigh", detail = "Extra high reasoning effort" },
-    { label = "$temp:<n>", detail = "Set temperature" },
-    { label = "$no-tools", detail = "Disable tools for this request" },
-  },
-  gt = {
-    { label = ">buffer", detail = "Attach current buffer text" },
-    { label = ">selection", detail = "Attach current selection" },
-    { label = ">diagnostics", detail = "Attach current buffer diagnostics" },
-    { label = ">diff", detail = "Attach project diff reference" },
-    { label = ">file:<path>", detail = "Attach a file path reference" },
-    { label = ">zk:<id>", detail = "Attach a ZK note id reference" },
-  },
-}
 
 local kind_to_prefix = {
   models = "$model:",
@@ -78,16 +45,7 @@ local function unwrap_list(data)
 end
 
 function M.static_for_trigger(trigger)
-  if trigger == "/" then
-    return vim.deepcopy(static.slash)
-  elseif trigger == "@" then
-    return vim.deepcopy(static.at)
-  elseif trigger == "$" then
-    return vim.deepcopy(static.dollar)
-  elseif trigger == ">" then
-    return vim.deepcopy(static.gt)
-  end
-  return {}
+  return tokens.static_for_trigger(trigger)
 end
 
 function M.kind_for_trigger(trigger)
@@ -145,7 +103,7 @@ function M.ensure_refresh(kind)
 end
 
 function M.static()
-  return static
+  return tokens.static()
 end
 
 return M

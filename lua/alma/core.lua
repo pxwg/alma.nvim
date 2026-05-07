@@ -1,5 +1,6 @@
 local config = require("alma.config")
 local events = require("alma.events")
+local request_metadata = require("alma.ui.metadata")
 local util = require("alma.util")
 
 local M = {}
@@ -19,12 +20,17 @@ local function is_busy(thread)
 end
 
 local function request_user_block(request)
-  return {
+  return request_metadata.apply_to_block({
     type = "UserBlock",
     text = request.spec.prompt,
     local_only = true,
+    metadata = request.spec.metadata,
     context_count = #(request.spec.ephemeral_context or {}),
-  }
+  }, request_metadata.from_request(request))
+end
+
+local function request_assistant_block(request, block)
+  return request_metadata.apply_to_block(block, request_metadata.from_request(request))
 end
 
 local function queued_block(request)
@@ -33,13 +39,13 @@ local function queued_block(request)
   return block
 end
 
-local function queued_assistant_block()
-  return {
+local function queued_assistant_block(request)
+  return request_assistant_block(request, {
     type = "AssistantBlock",
     text = "⏳ Queued. Alma will send this after the current response finishes.",
     state = "queued",
     local_only = true,
-  }
+  })
 end
 
 local function message_text(message)
@@ -129,30 +135,30 @@ local function active_blocks(thread, request)
   end
   local has_stream = false
   if thread.streaming_reasoning_text and thread.streaming_reasoning_text ~= "" then
-    table.insert(blocks, {
+    table.insert(blocks, request_assistant_block(request, {
       type = "ReasoningBlock",
       text = thread.streaming_reasoning_text,
       state = "streaming",
       local_only = true,
-    })
+    }))
     has_stream = true
   end
   if thread.streaming_text and thread.streaming_text ~= "" then
-    table.insert(blocks, {
+    table.insert(blocks, request_assistant_block(request, {
       type = "AssistantBlock",
       text = thread.streaming_text,
       state = "streaming",
       local_only = true,
-    })
+    }))
     has_stream = true
   end
   if not has_stream then
-    table.insert(blocks, {
+    table.insert(blocks, request_assistant_block(request, {
       type = "AssistantBlock",
       text = "⏳ Alma is thinking...",
       state = "loading",
       local_only = true,
-    })
+    }))
   end
   return blocks
 end
@@ -164,7 +170,7 @@ local function rebuild_local_blocks(thread)
   end
   for _, request in ipairs(thread.queue or {}) do
     table.insert(blocks, queued_block(request))
-    table.insert(blocks, queued_assistant_block())
+    table.insert(blocks, queued_assistant_block(request))
   end
   thread.local_blocks = blocks
 end

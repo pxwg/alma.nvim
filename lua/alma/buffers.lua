@@ -65,7 +65,7 @@ local function setup_buffer_autocmds(bufnr, thread_id)
   })
 end
 
-function M.open_thread(thread_id, opts)
+function M.ensure_thread(thread_id, opts)
   opts = opts or {}
   local thread = state.get_thread(thread_id, {
     cwd = opts.cwd or config.resolve_cwd(0),
@@ -73,7 +73,6 @@ function M.open_thread(thread_id, opts)
   })
 
   if thread.bufnr and vim.api.nvim_buf_is_valid(thread.bufnr) then
-    util.open_or_focus_buf(thread.bufnr)
     return thread
   end
 
@@ -87,7 +86,13 @@ function M.open_thread(thread_id, opts)
   vim.bo[bufnr].undolevels = 1000
   state.bind_buffer(thread, bufnr)
   setup_buffer_autocmds(bufnr, thread_id)
-  vim.api.nvim_set_current_buf(bufnr)
+  require("alma.ui.render").render(thread)
+  return thread
+end
+
+function M.open_thread(thread_id, opts)
+  local thread = M.ensure_thread(thread_id, opts)
+  util.open_or_focus_buf(thread.bufnr)
   require("alma.ui.render").render(thread)
   return thread
 end

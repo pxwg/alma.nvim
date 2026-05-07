@@ -1,3 +1,4 @@
+local request_metadata = require("alma.ui.metadata")
 local util = require("alma.util")
 
 local M = {}
@@ -153,7 +154,46 @@ local function metadata_of(item)
   if type(item) ~= "table" then
     return {}
   end
-  return item.metadata or item.userMessageMetadata or {}
+  local msg = type(item.message) == "table" and item.message or {}
+  return vim.tbl_deep_extend(
+    "force",
+    {},
+    msg.metadata or {},
+    msg.userMessageMetadata or {},
+    item.metadata or {},
+    item.userMessageMetadata or {}
+  )
+end
+
+local function parent_id_of(item)
+  if type(item) ~= "table" then
+    return nil
+  end
+  local msg = message_of(item)
+  return item.parentId or item.parent_id or msg.parentId or msg.parent_id
+end
+
+local function message_ids(item)
+  if type(item) ~= "table" then
+    return {}
+  end
+  local msg = message_of(item)
+  local ids = {}
+  local seen = {}
+  for _, id in ipairs({ item.id, msg.id }) do
+    if type(id) == "string" and id ~= "" and not seen[id] then
+      table.insert(ids, id)
+      seen[id] = true
+    end
+  end
+  return ids
+end
+
+local function part_metadata(parent_metadata, part)
+  if type(part) ~= "table" then
+    return parent_metadata or {}
+  end
+  return vim.tbl_deep_extend("force", {}, parent_metadata or {}, part.metadata or {}, part.userMessageMetadata or {})
 end
 
 local function parts_text(parts)
@@ -177,49 +217,6 @@ local function looks_like_user_message(item, msg, id)
   return first_text(metadata_of(item).original_text, metadata_of(item).originalText) ~= ""
 end
 
-local function token_metadata_from_original(metadata)
-  local original = first_text(metadata.original_text, metadata.originalText)
-  local found = {}
-  for _, line in ipairs(util.split_lines(original)) do
-    local trimmed = util.trim(line)
-    found.model = found.model or trimmed:match("^%$model:%s*(.+)$")
-    found.reasoning_effort = found.reasoning_effort or trimmed:match("^%$reasoning:%s*(.+)$")
-  end
-  if found.model then
-    found.model = util.trim(found.model)
-  end
-  if found.reasoning_effort then
-    found.reasoning_effort = util.trim(found.reasoning_effort)
-  end
-  return found
-end
-
-local function request_metadata(metadata)
-  local legacy = token_metadata_from_original(metadata)
-  local model = first_text(metadata.model, metadata.request_model, metadata.requestModel, metadata.ephemeralModel, legacy.model)
-  local reasoning = first_text(metadata.reasoning_effort, metadata.reasoningEffort, legacy.reasoning_effort)
-  if model == "" and reasoning == "" then
-    return nil
-  end
-  return {
-    model = model ~= "" and model or nil,
-    reasoning_effort = reasoning ~= "" and reasoning or nil,
-    model_override = metadata.modelOverride == true,
-    reasoning_override = metadata.reasoningOverride == true,
-  }
-end
-
-local function apply_request_metadata(block, metadata)
-  if not block or not metadata then
-    return block
-  end
-  block.request_model = metadata.model
-  block.request_reasoning_effort = metadata.reasoning_effort
-  block.model_override = metadata.model_override
-  block.reasoning_override = metadata.reasoning_override
-  return block
-end
-
 local function block_from_message(item, index, context)
   context = context or {}
   local msg = message_of(item)
@@ -231,7 +228,10 @@ local function block_from_message(item, index, context)
   local parts = msg.parts or item.parts or {}
   local blocks = {}
   local metadata = metadata_of(item)
-  local parent_request_metadata = context.request_metadata_by_id and context.request_metadata_by_id[item.parentId or item.parent_id]
+  local parent_id = parent_id_of(item)
+  local parent_request_metadata = context.request_metadata_by_id and context.request_metadata_by_id[parent_id]
+  local own_request_metadata = request_metadata.from_message(item)
+  local inherited_request_metadata = own_request_metadata or parent_request_metadata
 
   local content = first_text(msg.content, msg.text, item.content, item.text)
   if content == "" and #parts > 0 then
@@ -242,22 +242,24 @@ local function block_from_message(item, index, context)
   end
 
   if role == "user" then
-    table.insert(blocks, {
+    table.insert(blocks, request_metadata.apply_to_block({
       type = "UserBlock",
       message_id = id,
+      metadata = metadata,
       text = content,
       raw = item,
-    })
+    }, own_request_metadata))
     return blocks
   end
 
   if #parts == 0 then
-    table.insert(blocks, apply_request_metadata({
+    table.insert(blocks, request_metadata.apply_to_block({
       type = "AssistantBlock",
       message_id = id,
+      metadata = metadata,
       text = content,
       raw = item,
-    }, parent_request_metadata))
+    }, inherited_request_metadata))
     return blocks
   end
 
@@ -266,12 +268,13 @@ local function block_from_message(item, index, context)
     if #assistant_text == 0 then
       return
     end
-    table.insert(blocks, apply_request_metadata({
+    table.insert(blocks, request_metadata.apply_to_block({
       type = "AssistantBlock",
       message_id = id,
+      metadata = metadata,
       text = table.concat(assistant_text, "\n"),
       raw = item,
-    }, parent_request_metadata))
+    }, inherited_request_metadata))
     assistant_text = {}
   end
 
@@ -284,27 +287,30 @@ local function block_from_message(item, index, context)
       end
     elseif typ == "reasoning" then
       flush_assistant_text()
-      table.insert(blocks, apply_request_metadata({
+      table.insert(blocks, request_metadata.apply_to_block({
         type = "ReasoningBlock",
         message_id = id,
+        metadata = part_metadata(metadata, part),
         text = part_text(part),
         state = part.state,
         raw = part,
-      }, parent_request_metadata))
+      }, inherited_request_metadata))
     elseif typ == "step-start" then
       flush_assistant_text()
-      table.insert(blocks, apply_request_metadata({
+      table.insert(blocks, request_metadata.apply_to_block({
         type = "AgentTimelineBlock",
         message_id = id,
+        metadata = part_metadata(metadata, part),
         title = first_text(part.title, part.label, part.id, "step-start"),
         text = part_text(part),
         raw = part,
-      }, parent_request_metadata))
+      }, inherited_request_metadata))
     elseif vim.startswith(typ, "tool-") then
       flush_assistant_text()
-      table.insert(blocks, apply_request_metadata({
+      table.insert(blocks, request_metadata.apply_to_block({
         type = "ToolCallBlock",
         message_id = id,
+        metadata = part_metadata(metadata, part),
         tool = tool_name(part),
         state = part.state,
         tool_call_id = part.toolCallId or part.tool_call_id,
@@ -312,15 +318,16 @@ local function block_from_message(item, index, context)
         output = part.output,
         text = part_text(part),
         raw = part,
-      }, parent_request_metadata))
+      }, inherited_request_metadata))
     else
       flush_assistant_text()
-      table.insert(blocks, apply_request_metadata({
+      table.insert(blocks, request_metadata.apply_to_block({
         type = "RawEventBlock",
         message_id = id,
+        metadata = part_metadata(metadata, part),
         title = "Unknown message part: " .. tostring(typ),
         raw = part,
-      }, parent_request_metadata))
+      }, inherited_request_metadata))
     end
   end
   flush_assistant_text()
@@ -335,19 +342,66 @@ function M.normalize_messages(messages)
   end
 
   local context = { request_metadata_by_id = {} }
+  local item_by_id = {}
   for _, item in ipairs(messages) do
-    local msg = message_of(item)
-    local id = msg.id or item.id
-    if looks_like_user_message(item, msg, id) then
-      local metadata = request_metadata(metadata_of(item))
-      if metadata then
-        if item.id then
-          context.request_metadata_by_id[item.id] = metadata
-        end
-        if msg.id then
-          context.request_metadata_by_id[msg.id] = metadata
-        end
+    for _, id in ipairs(message_ids(item)) do
+      item_by_id[id] = item
+    end
+  end
+
+  local resolving = {}
+  local function cache_request_metadata(item, metadata)
+    if not metadata then
+      return
+    end
+    for _, id in ipairs(message_ids(item)) do
+      context.request_metadata_by_id[id] = metadata
+    end
+  end
+
+  local resolve_by_id
+  local function resolve_item_request_metadata(item)
+    if type(item) ~= "table" then
+      return nil
+    end
+    local own = request_metadata.from_message(item)
+    if own then
+      cache_request_metadata(item, own)
+      return own
+    end
+    return resolve_by_id(parent_id_of(item))
+  end
+
+  resolve_by_id = function(id)
+    if type(id) ~= "string" or id == "" then
+      return nil
+    end
+    if context.request_metadata_by_id[id] then
+      return context.request_metadata_by_id[id]
+    end
+    if resolving[id] then
+      return nil
+    end
+    local item = item_by_id[id]
+    if not item then
+      return nil
+    end
+    resolving[id] = true
+    local metadata = resolve_item_request_metadata(item)
+    resolving[id] = nil
+    if metadata then
+      cache_request_metadata(item, metadata)
+      if not context.request_metadata_by_id[id] then
+        context.request_metadata_by_id[id] = metadata
       end
+    end
+    return metadata
+  end
+
+  for _, item in ipairs(messages) do
+    local metadata = resolve_item_request_metadata(item)
+    if metadata then
+      cache_request_metadata(item, metadata)
     end
   end
 

@@ -16,6 +16,21 @@ local state = require("alma.state")
 local ws = require("alma.ws")
 local config = require("alma.config")
 local render = require("alma.ui.render")
+local request_metadata = require("alma.ui.metadata")
+local tokens = require("alma.ui.tokens")
+
+local function thread_visible_windows(test_thread)
+  local wins = {}
+  if not test_thread or not test_thread.bufnr or not vim.api.nvim_buf_is_valid(test_thread.bufnr) then
+    return wins
+  end
+  for _, win in ipairs(vim.fn.win_findbuf(test_thread.bufnr)) do
+    if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == test_thread.bufnr then
+      table.insert(wins, win)
+    end
+  end
+  return wins
+end
 
 local function save_view(win)
   return vim.api.nvim_win_call(win, function()
@@ -41,6 +56,160 @@ local function assert_cursor_in_composer(thread, win, label)
   local cursor = vim.api.nvim_win_get_cursor(win)
   assert(thread.prompt_start ~= nil, label .. " prompt start exists")
   assert(cursor[1] >= thread.prompt_start + 1, label .. " cursor stays in composer")
+end
+
+local function assert_bottom_composer(thread, win, label)
+  assert(thread and thread.bufnr and vim.api.nvim_buf_is_valid(thread.bufnr), label .. " thread buffer exists")
+  assert(vim.api.nvim_win_is_valid(win), label .. " window exists")
+  assert_eq(vim.api.nvim_win_get_buf(win), thread.bufnr, label .. " window shows thread buffer")
+  assert(thread.prompt_start ~= nil, label .. " prompt start exists")
+  local lines = vim.api.nvim_buf_get_lines(thread.bufnr, 0, -1, false)
+  assert_eq(lines[thread.prompt_start], config.get().render.prompt_marker, label .. " bottom composer marker")
+  assert_cursor_in_composer(thread, win, label)
+end
+
+local function has_label(items, label)
+  for _, item in ipairs(items or {}) do
+    if item.label == label then
+      return true
+    end
+  end
+  return false
+end
+
+local valid_composer_hl = {
+  AlmaComposerCommand = true,
+  AlmaComposerMention = true,
+  AlmaComposerSelector = true,
+}
+
+local stream_decoration_hl = {
+  AlmaStreamRaw = true,
+  AlmaStreamSubAgent = true,
+  AlmaStreamTimeline = true,
+  AlmaStreamTool = true,
+}
+
+local function composer_token_marks(bufnr, namespace)
+  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local out = {}
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, namespace, 0, -1, { details = true })) do
+    local details = mark[4] or {}
+    if valid_composer_hl[details.hl_group] and details.end_col then
+      local line = lines[mark[2] + 1] or ""
+      local token = line:sub(mark[3] + 1, details.end_col)
+      out[token] = out[token] or {}
+      table.insert(out[token], {
+        line = mark[2] + 1,
+        col = mark[3],
+        end_col = details.end_col,
+        hl_group = details.hl_group,
+      })
+    end
+  end
+  return out
+end
+
+local function stream_decoration_marks(bufnr, namespace)
+  local out = {}
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, namespace, 0, -1, { details = true })) do
+    local details = mark[4] or {}
+    if details.virt_text_pos == "inline" and details.virt_text then
+      for _, chunk in ipairs(details.virt_text) do
+        if stream_decoration_hl[chunk[2]] then
+          local lnum = mark[2] + 1
+          out[lnum] = out[lnum] or {}
+          table.insert(out[lnum], {
+            marker = chunk[1],
+            hl_group = chunk[2],
+          })
+        end
+      end
+    end
+  end
+  return out
+end
+
+local function header_overlay_text(bufnr, namespace, line)
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, namespace, 0, -1, { details = true })) do
+    local details = mark[4] or {}
+    if mark[2] + 1 == line and details.virt_text_pos == "overlay" and details.virt_text then
+      local text = ""
+      for _, chunk in ipairs(details.virt_text) do
+        text = text .. (chunk[1] or "")
+      end
+      return text
+    end
+  end
+  return ""
+end
+
+local function assert_header_contains(bufnr, namespace, line, needle, label)
+  local text = header_overlay_text(bufnr, namespace, line)
+  if not text:find(needle, 1, true) then
+    error(label .. ": expected header to contain " .. vim.inspect(needle) .. ", got " .. vim.inspect(text))
+  end
+end
+
+local function assert_header_not_contains(bufnr, namespace, line, needle, label)
+  local text = header_overlay_text(bufnr, namespace, line)
+  if text:find(needle, 1, true) then
+    error(label .. ": unexpected header text " .. vim.inspect(needle) .. " in " .. vim.inspect(text))
+  end
+end
+
+local function lines_for_block(test_thread, block)
+  local lines = {}
+  for lnum, indexed_block in pairs(test_thread.render_index or {}) do
+    if indexed_block == block then
+      table.insert(lines, lnum)
+    end
+  end
+  table.sort(lines)
+  return lines
+end
+
+local function assert_stream_decoration(test_thread, marks, block, hl_group, label)
+  for _, lnum in ipairs(lines_for_block(test_thread, block)) do
+    for _, mark in ipairs(marks[lnum] or {}) do
+      if mark.hl_group == hl_group then
+        return
+      end
+    end
+  end
+  error(label .. ": expected " .. hl_group .. " stream decoration, got " .. vim.inspect(lines_for_block(test_thread, block)))
+end
+
+local function assert_no_stream_decoration(test_thread, marks, block, label)
+  for _, lnum in ipairs(lines_for_block(test_thread, block)) do
+    if marks[lnum] then
+      error(label .. ": unexpected stream decoration on line " .. tostring(lnum) .. ": " .. vim.inspect(marks[lnum]))
+    end
+  end
+end
+
+local function assert_token_mark(marks, token, hl_group, min_line, label)
+  for _, mark in ipairs(marks[token] or {}) do
+    if mark.hl_group == hl_group and mark.line >= min_line then
+      return
+    end
+  end
+  error(label .. ": expected " .. token .. " with " .. hl_group .. ", got " .. vim.inspect(marks[token]))
+end
+
+local function assert_no_token_mark(marks, token, label)
+  if marks[token] then
+    error(label .. ": unexpected valid-token mark for " .. token .. ": " .. vim.inspect(marks[token]))
+  end
+end
+
+local function assert_no_composer_marks_before(bufnr, namespace, first_line, label)
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, namespace, 0, -1, { details = true })) do
+    local details = mark[4] or {}
+    if valid_composer_hl[details.hl_group] and mark[2] + 1 < first_line then
+      error(label .. ": unexpected composer token mark before prompt: " .. vim.inspect(mark))
+    end
+  end
 end
 
 local function history_blocks(prefix, count)
@@ -69,6 +238,38 @@ assert_eq(config.api_url(), "http://localhost:23001", "setup api url override")
 assert_eq(config.ws_url(), "ws://localhost:23001/ws/threads", "setup ws url override")
 config.setup({ notify = false })
 
+local slash_new = tokens.classify("/new")
+assert(has_label(tokens.static_for_trigger("/"), "/new"), "token static slash includes /new")
+assert(has_label(tokens.static_for_trigger("/"), "/stop"), "token static slash includes /stop")
+assert(has_label(tokens.static_for_trigger("/"), "/rename"), "token static slash includes /rename")
+assert(has_label(tokens.static_for_trigger("/"), "/skill:<id>"), "token static slash includes /skill:<id>")
+assert_eq(slash_new.valid, true, "token slash new valid")
+assert_eq(slash_new.command, "new", "token slash new command")
+assert_eq(tokens.classify("/stop").command, "stop", "token slash stop command")
+assert_eq(tokens.classify("/rename").command, "rename", "token slash rename command")
+assert_eq(tokens.classify("/skill:lint").kind, "skill", "token skill selector valid")
+assert_eq(tokens.classify("/unknown").valid, false, "token invalid slash rejected")
+
+local model_selector = tokens.classify("$model:gpt-test")
+assert(has_label(tokens.static_for_trigger("$"), "$model:<id>"), "token static dollar includes model selector")
+assert(has_label(tokens.static_for_trigger("$"), "$reasoning:xhigh"), "token static dollar includes reasoning selector")
+assert(has_label(tokens.static_for_trigger("$"), "$temp:<n>"), "token static dollar includes temp selector")
+assert(has_label(tokens.static_for_trigger("$"), "$no-tools"), "token static dollar includes no-tools selector")
+assert_eq(model_selector.valid, true, "token model selector valid")
+assert_eq(model_selector.value, "gpt-test", "token model selector value")
+assert_eq(tokens.classify("$reasoning:xhigh").value, "xhigh", "token reasoning selector value")
+assert_eq(tokens.classify("$temp:0.25").value, 0.25, "token temp selector value")
+assert_eq(tokens.classify("$no-tools").selector, "no_tools", "token no-tools selector valid")
+assert_eq(tokens.classify("$temp:not-a-number").valid, false, "token invalid temp rejected")
+
+assert_eq(tokens.classify("@ConfiguredTool", { tools = { "ConfiguredTool" } }).valid, true, "token configured tool valid")
+assert_eq(tokens.classify("@OtherTool", { tools = { "ConfiguredTool" } }).valid, false, "token unknown configured tool rejected")
+assert_eq(tokens.classify("@FallbackTool", { tools = {} }).valid, true, "token fallback tool valid without catalog data")
+assert_eq(tokens.classify("@mcp:server-one", { mcp_servers = { "server-one" } }).valid, true, "token configured mcp valid")
+assert_eq(tokens.classify("@mcp:server-two", { mcp_servers = { "server-one" } }).valid, false, "token unknown configured mcp rejected")
+assert_eq(tokens.classify("@group:default").valid, true, "token group form valid")
+assert_eq(tokens.classify("@group:").valid, false, "token empty group rejected")
+
 local thread = state.get_thread("validate-thread", { cwd = root })
 local spec = parser.parse_input({
   "$model: test-model",
@@ -88,6 +289,66 @@ assert_eq(spec.tools[1], "Bash", "parser tool")
 assert_eq(spec.ephemeral_context[1].type, "diagnostics", "parser context")
 
 local payload = parser.compile_request(thread, spec)
+local current_request_metadata = request_metadata.from_request({ spec = spec, payload = payload })
+assert_eq(current_request_metadata.model, "test-model", "metadata helper current request model")
+assert_eq(current_request_metadata.reasoning_effort, "xhigh", "metadata helper current request reasoning")
+local block_request_metadata = request_metadata.from_block({
+  metadata = { requestModel = "block-model", reasoningEffort = "high" },
+})
+assert_eq(block_request_metadata.model, "block-model", "metadata helper block metadata model")
+assert_eq(block_request_metadata.reasoning_effort, "high", "metadata helper block metadata reasoning")
+local message_request_metadata = request_metadata.from_message({
+  message = {
+    metadata = {
+      originalText = "$model:message-model\n$reasoning:medium\nhello",
+      modelOverride = true,
+      reasoningOverride = true,
+    },
+  },
+})
+assert_eq(message_request_metadata.model, "message-model", "metadata helper message original model")
+assert_eq(message_request_metadata.reasoning_effort, "medium", "metadata helper message original reasoning")
+local legacy_override_metadata = request_metadata.from_metadata({
+  model = "thread-default-model",
+  reasoningEffort = "low",
+  originalText = "$model:legacy-request-model\n$reasoning:high\nhello",
+  modelOverride = true,
+  reasoningOverride = true,
+})
+assert_eq(legacy_override_metadata.model, "legacy-request-model", "metadata helper selector model overrides generic model")
+assert_eq(
+  legacy_override_metadata.reasoning_effort,
+  "high",
+  "metadata helper selector reasoning overrides generic reasoning"
+)
+local no_request_metadata = request_metadata.resolve({ config = { model = "thread-default", reasoning_effort = "low" } }, {})
+assert_eq(no_request_metadata, nil, "metadata helper does not fabricate thread defaults")
+local pending_metadata_thread = { pending_request = { spec = { model = "pending-model", reasoning_effort = "low" } } }
+local historical_labels = request_metadata.assistant_labels(pending_metadata_thread, { type = "AssistantBlock" })
+assert_eq(#historical_labels, 0, "metadata helper does not apply pending request to historical block")
+local local_labels = request_metadata.assistant_labels(
+  pending_metadata_thread,
+  { type = "AssistantBlock", local_only = true },
+  pending_metadata_thread.pending_request
+)
+assert_eq(local_labels[1], "pending-model", "metadata helper applies pending request to local block")
+local formatted_request_labels = request_metadata.request_labels({
+  model = "provider:gpt-formatted",
+  reasoning_effort = "high",
+})
+assert_eq(formatted_request_labels[1], "gpt-formatted", "metadata formatter shortens model label")
+assert_eq(formatted_request_labels[2], "effort high", "metadata formatter reasoning label")
+local composer_option_labels = request_metadata.composer_labels({
+  config = { model = "thread-option-model", reasoning_effort = "medium" },
+})
+assert_eq(composer_option_labels[1], "thread-option-model", "metadata composer labels use thread model")
+assert_eq(composer_option_labels[2], "effort medium", "metadata composer labels use thread reasoning")
+assert_eq(request_metadata.context_label({ context_usage = {} }), nil, "metadata helper does not fabricate context label")
+assert_eq(
+  request_metadata.context_label({ context_usage = { remainingTokens = 2048 } }),
+  "ctx remaining 2048",
+  "metadata helper uses real context remaining"
+)
 assert_eq(payload.type, "generate_response", "compiled payload type")
 assert_eq(payload.data.threadId, "validate-thread", "compiled payload thread")
 assert_eq(payload.data.userMessage.role, "user", "compiled user message role")
@@ -211,6 +472,139 @@ assert_eq(chronological_blocks[3].request_reasoning_effort, "xhigh", "reasoning 
 assert_eq(chronological_blocks[4].type, "AssistantBlock", "chronological assistant block")
 assert_eq(chronological_blocks[4].request_model, "test-model", "assistant inherits request model")
 
+local deepseek_blocks = events.normalize_messages({
+  {
+    id = "deepseek-thread--user-1",
+    message = {
+      id = "deepseek-user-1",
+      role = "user",
+      parts = { { type = "text", text = "question" } },
+    },
+    metadata = {
+      original_text = "$model:deepseek-v4-pro\nquestion",
+      modelOverride = true,
+    },
+  },
+  {
+    id = "deepseek-thread--assistant-1",
+    parentId = "deepseek-thread--user-1",
+    message = {
+      id = "deepseek-assistant-1",
+      role = "assistant",
+      parts = { { type = "text", text = "answer" } },
+    },
+  },
+})
+assert_eq(deepseek_blocks[1].type, "UserBlock", "deepseek request user block")
+assert_eq(
+  deepseek_blocks[1].metadata.original_text,
+  "$model:deepseek-v4-pro\nquestion",
+  "deepseek model selector remains in user metadata"
+)
+assert_eq(deepseek_blocks[1].request_model, "deepseek-v4-pro", "deepseek user request model metadata")
+assert_eq(deepseek_blocks[2].request_model, "deepseek-v4-pro", "deepseek assistant inherits parent model")
+
+local chained_metadata_blocks = events.normalize_messages({
+  {
+    id = "chain-thread--user-1",
+    message = {
+      id = "chain-user-1",
+      role = "user",
+      parts = { { type = "text", text = "question" } },
+    },
+    metadata = {
+      original_text = "$model:chain-parent-model\n$reasoning:high\nquestion",
+      modelOverride = true,
+      reasoningOverride = true,
+    },
+  },
+  {
+    id = "chain-thread--assistant-1",
+    parentId = "chain-thread--user-1",
+    message = {
+      id = "chain-assistant-1",
+      role = "assistant",
+      parts = { { type = "text", text = "intermediate answer" } },
+    },
+  },
+  {
+    id = "chain-thread--assistant-2",
+    parentId = "chain-thread--assistant-1",
+    message = {
+      id = "chain-assistant-2",
+      role = "assistant",
+      parts = { { type = "text", text = "follow-up answer" } },
+    },
+  },
+})
+assert_eq(chained_metadata_blocks[2].request_model, "chain-parent-model", "first assistant inherits parent model")
+assert_eq(
+  chained_metadata_blocks[3].request_model,
+  "chain-parent-model",
+  "assistant inherits request model through assistant parent chain"
+)
+assert_eq(
+  chained_metadata_blocks[3].request_reasoning_effort,
+  "high",
+  "assistant inherits request reasoning through assistant parent chain"
+)
+
+local direct_assistant_metadata_blocks = events.normalize_messages({
+  {
+    id = "direct-thread--user-1",
+    message = {
+      id = "direct-user-1",
+      role = "user",
+      parts = { { type = "text", text = "question" } },
+    },
+    metadata = {
+      original_text = "$model:direct-parent-model\n$reasoning:medium\nquestion",
+      modelOverride = true,
+      reasoningOverride = true,
+    },
+  },
+  {
+    id = "direct-thread--assistant-1",
+    parentId = "direct-thread--user-1",
+    message = {
+      id = "direct-assistant-1",
+      role = "assistant",
+      metadata = {
+        requestModel = "direct-assistant-model",
+        reasoningEffort = "low",
+      },
+      parts = { { type = "text", text = "answer" } },
+    },
+  },
+})
+assert_eq(
+  direct_assistant_metadata_blocks[2].request_model,
+  "direct-assistant-model",
+  "assistant direct metadata overrides inherited parent model"
+)
+assert_eq(
+  direct_assistant_metadata_blocks[2].request_reasoning_effort,
+  "low",
+  "assistant direct metadata overrides inherited parent reasoning"
+)
+
+local subagent_metadata_blocks = events.normalize_messages({
+  {
+    message = {
+      id = "m-subagent",
+      role = "assistant",
+      metadata = { subAgentId = "researcher" },
+      parts = { { type = "text", text = "delegated normalized output" } },
+    },
+  },
+})
+assert_eq(subagent_metadata_blocks[1].type, "AssistantBlock", "subagent metadata message normalizes as assistant")
+assert_eq(
+  subagent_metadata_blocks[1].metadata.subAgentId,
+  "researcher",
+  "subagent metadata is preserved for renderer"
+)
+
 local nvim_user_blocks = events.normalize_messages({
   {
     id = "thread--user-1",
@@ -287,6 +681,8 @@ local _, effects = core.reduce_thread(thread, {
 })
 assert_eq(#thread.queue, 1, "busy submit queues")
 assert(#thread.local_blocks >= 2, "queued submit renders local blocks")
+assert_eq(thread.local_blocks[1].metadata.requestModel, "test-model", "queued user block stores request model metadata")
+assert_eq(thread.local_blocks[2].request_model, "test-model", "queued assistant block inherits request model")
 assert(effects[1].type == "notify" or effects[2].type == "notify", "queued submit notifies")
 local has_rest_fetch_thread = false
 for _, effect in ipairs(effects) do
@@ -382,6 +778,8 @@ assert(positions["### Agent Timeline: step-start"] < positions["### Reasoning [d
 assert(positions["### Reasoning [done]"] < positions["answer second"], "reasoning renders before assistant text")
 assert_eq(rendered_lines[#rendered_lines - 1], "## You", "idle prompt uses user header")
 local render_ns = vim.api.nvim_get_namespaces()["alma.nvim"]
+assert_header_contains(bufnr, render_ns, positions["## Alma"], "test-model", "historical assistant header model")
+assert_header_contains(bufnr, render_ns, positions["## Alma"], "effort xhigh", "historical assistant header reasoning")
 local overlay_width_ok = false
 for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, render_ns, 0, -1, { details = true })) do
   local details = mark[4] or {}
@@ -413,6 +811,207 @@ assert(reasoning_text_ok, "reasoning body uses muted text highlight")
 assert(reasoning_border_ok, "reasoning body uses inline border marker")
 assert_eq(vim.bo[bufnr].modifiable, true, "idle chat buffer is editable")
 thread.last_error = nil
+
+local header_thread = state.get_thread("validate-header-metadata-thread", {
+  cwd = root,
+  model = "composer-thread-model",
+  reasoning_effort = "medium",
+})
+local header_bufnr = vim.api.nvim_create_buf(false, true)
+state.bind_buffer(header_thread, header_bufnr)
+header_thread.blocks = {}
+header_thread.local_blocks = {}
+header_thread.pending_request = nil
+header_thread.context_usage = {}
+header_thread.generation = "idle"
+render.render(header_thread)
+assert_header_contains(
+  header_bufnr,
+  render_ns,
+  header_thread.prompt_start,
+  "composer-thread-model",
+  "composer header thread model"
+)
+assert_header_contains(header_bufnr, render_ns, header_thread.prompt_start, "effort medium", "composer header thread reasoning")
+assert_header_not_contains(header_bufnr, render_ns, header_thread.prompt_start, "ctx", "composer header no fabricated ctx")
+assert_header_not_contains(
+  header_bufnr,
+  render_ns,
+  header_thread.prompt_start,
+  "remaining",
+  "composer header no fabricated context remaining"
+)
+header_thread.pending_request = {
+  spec = {
+    model = "composer-request-model",
+    reasoning_effort = "xhigh",
+    metadata = {
+      requestModel = "composer-request-model",
+      reasoningEffort = "xhigh",
+    },
+  },
+}
+render.render(header_thread)
+assert_header_contains(
+  header_bufnr,
+  render_ns,
+  header_thread.prompt_start,
+  "composer-request-model",
+  "composer header pending request model"
+)
+assert_header_contains(header_bufnr, render_ns, header_thread.prompt_start, "effort xhigh", "composer header pending reasoning")
+header_thread.context_usage = { remainingTokens = 321 }
+render.render(header_thread)
+assert_header_contains(
+  header_bufnr,
+  render_ns,
+  header_thread.prompt_start,
+  "ctx remaining 321",
+  "composer header real context remaining"
+)
+
+local stream_thread = state.get_thread("validate-stream-decoration-thread", { cwd = root })
+local stream_bufnr = vim.api.nvim_create_buf(false, true)
+state.bind_buffer(stream_thread, stream_bufnr)
+local primary_assistant_block = {
+  type = "AssistantBlock",
+  message_id = "stream-primary",
+  text = "ordinary primary answer",
+}
+local tool_decoration_block = {
+  type = "ToolCallBlock",
+  message_id = "stream-primary",
+  tool = "Bash",
+  state = "output-available",
+  output = "tool output body",
+}
+local timeline_decoration_block = {
+  type = "AgentTimelineBlock",
+  message_id = "stream-primary",
+  title = "step-start",
+  text = "timeline event body",
+}
+local raw_decoration_block = {
+  type = "RawEventBlock",
+  message_id = "stream-primary",
+  title = "unhandled",
+  raw = { type = "unknown_event", data = { value = 1 } },
+}
+local subagent_metadata_block = {
+  type = "AssistantBlock",
+  message_id = "stream-subagent-meta",
+  metadata = { subAgentId = "researcher" },
+  text = "delegated worker output",
+}
+local subagent_event_block = {
+  type = "AssistantBlock",
+  message_id = "stream-subagent-event",
+  event_type = "subagent_message_delta",
+  text = "delegated event output",
+}
+stream_thread.blocks = {
+  primary_assistant_block,
+  tool_decoration_block,
+  timeline_decoration_block,
+  raw_decoration_block,
+  subagent_metadata_block,
+  subagent_event_block,
+}
+stream_thread.local_blocks = {}
+stream_thread.pending_request = nil
+stream_thread.generation = "idle"
+render.render(stream_thread)
+local stream_marks = stream_decoration_marks(stream_bufnr, render_ns)
+assert_stream_decoration(stream_thread, stream_marks, tool_decoration_block, "AlmaStreamTool", "tool block gutter")
+assert_stream_decoration(
+  stream_thread,
+  stream_marks,
+  timeline_decoration_block,
+  "AlmaStreamTimeline",
+  "timeline block gutter"
+)
+assert_stream_decoration(stream_thread, stream_marks, raw_decoration_block, "AlmaStreamRaw", "raw event block gutter")
+assert_stream_decoration(
+  stream_thread,
+  stream_marks,
+  subagent_metadata_block,
+  "AlmaStreamSubAgent",
+  "subagent metadata block gutter"
+)
+assert_stream_decoration(
+  stream_thread,
+  stream_marks,
+  subagent_event_block,
+  "AlmaStreamSubAgent",
+  "subagent event block gutter"
+)
+assert_no_stream_decoration(stream_thread, stream_marks, primary_assistant_block, "primary assistant gutter")
+local persisted_stream_lines = vim.api.nvim_buf_get_lines(stream_bufnr, 0, -1, false)
+for _, line in ipairs(persisted_stream_lines) do
+  assert(not line:find("▌", 1, true), "tool gutter marker is virtual only")
+  assert(not line:find("▎", 1, true), "timeline gutter marker is virtual only")
+  assert(not line:find("╎", 1, true), "raw-event gutter marker is virtual only")
+  assert(not line:find("▸", 1, true), "subagent gutter marker is virtual only")
+end
+
+local command_hl = vim.api.nvim_get_hl(0, { name = "AlmaComposerCommand", link = true })
+local mention_hl = vim.api.nvim_get_hl(0, { name = "AlmaComposerMention", link = true })
+local selector_hl = vim.api.nvim_get_hl(0, { name = "AlmaComposerSelector", link = true })
+assert(command_hl and next(command_hl) ~= nil, "composer command highlight is defined")
+assert(mention_hl and next(mention_hl) ~= nil, "composer mention highlight is defined")
+assert(selector_hl and next(selector_hl) ~= nil, "composer selector highlight is defined")
+assert(next(vim.api.nvim_get_hl(0, { name = "AlmaStreamTool", link = true })) ~= nil, "tool stream highlight is defined")
+assert(
+  next(vim.api.nvim_get_hl(0, { name = "AlmaStreamTimeline", link = true })) ~= nil,
+  "timeline stream highlight is defined"
+)
+assert(next(vim.api.nvim_get_hl(0, { name = "AlmaStreamRaw", link = true })) ~= nil, "raw stream highlight is defined")
+assert(
+  next(vim.api.nvim_get_hl(0, { name = "AlmaStreamSubAgent", link = true })) ~= nil,
+  "subagent stream highlight is defined"
+)
+
+local token_thread = state.get_thread("validate-token-highlight-thread", { cwd = root })
+local token_bufnr = vim.api.nvim_create_buf(false, true)
+state.bind_buffer(token_thread, token_bufnr)
+token_thread.config.tools = { "ConfiguredTool" }
+token_thread.config.mcp_servers = { "server-one" }
+token_thread.config.tool_groups = { "ops" }
+token_thread.blocks = {
+  { type = "UserBlock", message_id = "token-user-1", text = "/new @Bash $model:historical" },
+  { type = "AssistantBlock", message_id = "token-assistant-1", text = "Historical @ConfiguredTool and $reasoning:high" },
+}
+token_thread.pending_request = nil
+token_thread.generation = "idle"
+token_thread.local_blocks = {}
+token_thread.prompt_lines = {
+  "/new @Bash @ConfiguredTool @mcp:server-one @group:ops",
+  "$model:gpt-test $reasoning:xhigh $temp:0.25 $no-tools /skill:lint",
+  "/unknown @UnknownTool $unknown $temp:not-a-number",
+}
+render.render(token_thread)
+local first_prompt_line = token_thread.prompt_start + 1
+local token_marks = composer_token_marks(token_bufnr, render_ns)
+assert_token_mark(token_marks, "/new", "AlmaComposerCommand", first_prompt_line, "composer slash command")
+assert_token_mark(token_marks, "/skill:lint", "AlmaComposerCommand", first_prompt_line, "composer skill token")
+assert_token_mark(token_marks, "@Bash", "AlmaComposerMention", first_prompt_line, "composer static mention")
+assert_token_mark(token_marks, "@ConfiguredTool", "AlmaComposerMention", first_prompt_line, "composer configured mention")
+assert_token_mark(token_marks, "@mcp:server-one", "AlmaComposerMention", first_prompt_line, "composer mcp mention")
+assert_token_mark(token_marks, "@group:ops", "AlmaComposerMention", first_prompt_line, "composer group mention")
+assert_token_mark(token_marks, "$model:gpt-test", "AlmaComposerSelector", first_prompt_line, "composer model selector")
+assert_token_mark(token_marks, "$reasoning:xhigh", "AlmaComposerSelector", first_prompt_line, "composer reasoning selector")
+assert_token_mark(token_marks, "$temp:0.25", "AlmaComposerSelector", first_prompt_line, "composer temperature selector")
+assert_token_mark(token_marks, "$no-tools", "AlmaComposerSelector", first_prompt_line, "composer no-tools selector")
+assert_no_token_mark(token_marks, "/unknown", "invalid slash token")
+assert_no_token_mark(token_marks, "@UnknownTool", "unknown mention token")
+assert_no_token_mark(token_marks, "$unknown", "unknown selector token")
+assert_no_token_mark(token_marks, "$temp:not-a-number", "invalid selector token")
+assert_no_composer_marks_before(token_bufnr, render_ns, first_prompt_line, "historical text token highlighting")
+assert_eq(
+  vim.api.nvim_buf_get_lines(token_bufnr, token_thread.prompt_start - 1, token_thread.prompt_start, false)[1],
+  "## You",
+  "token highlight render keeps bottom composer marker"
+)
 
 local sticky_win = vim.api.nvim_get_current_win()
 vim.api.nvim_win_set_cursor(sticky_win, { thread.prompt_start + 1, 0 })
@@ -449,6 +1048,12 @@ assert_eq(locked_lines[#locked_lines - 1], "## You", "submitted render keeps bot
 assert(alma_line and loading_line and alma_line < loading_line, "submitted assistant loading has Alma heading")
 assert(loading_line and composer_line and loading_line < composer_line, "submitted assistant loading renders before composer")
 assert_eq(old_heading_count, 0, "submitted render avoids legacy state headings")
+assert_header_contains(bufnr, render_ns, you_positions[1], "test-model", "submitted user header model")
+assert_header_contains(bufnr, render_ns, you_positions[1], "effort xhigh", "submitted user header reasoning")
+assert_header_contains(bufnr, render_ns, alma_line, "test-model", "active assistant header model")
+assert_header_contains(bufnr, render_ns, alma_line, "effort xhigh", "active assistant header reasoning")
+assert_header_contains(bufnr, render_ns, composer_line, "test-model", "active composer header model")
+assert_header_contains(bufnr, render_ns, composer_line, "effort xhigh", "active composer header reasoning")
 assert_eq(vim.bo[bufnr].modifiable, true, "generating chat buffer remains editable")
 assert_cursor_in_composer(thread, sticky_win, "sticky submitted render")
 assert_near_bottom(sticky_win, bufnr, "sticky submitted render")
@@ -480,6 +1085,8 @@ end
 assert(streaming_alma_pos and reasoning_pos and streaming_alma_pos < reasoning_pos, "streaming reasoning is inside Alma section")
 assert(reasoning_pos and answer_pos and reasoning_pos < answer_pos, "streaming reasoning renders before answer")
 assert(answer_pos and streaming_composer_pos and answer_pos < streaming_composer_pos, "streaming answer renders before composer")
+assert_header_contains(bufnr, render_ns, streaming_alma_pos, "test-model", "streaming assistant header model")
+assert_header_contains(bufnr, render_ns, streaming_alma_pos, "effort xhigh", "streaming assistant header reasoning")
 assert_eq(
   vim.api.nvim_buf_get_lines(bufnr, thread.prompt_start, thread.prompt_start + 1, false)[1],
   "draft next request",
@@ -528,6 +1135,57 @@ render.on_user_view_changed(thread, sticky_win, "cursor")
 thread.local_blocks[2].text = "streaming\nnew\ncontent\nresumed"
 render.render(thread)
 assert_near_bottom(sticky_win, bufnr, "sticky resumes after returning bottom")
+
+local legacy_thread = require("alma").open_thread("validate-legacy-thread")
+local legacy_win = vim.api.nvim_get_current_win()
+assert_eq(vim.api.nvim_win_get_buf(legacy_win), legacy_thread.bufnr, "legacy open_thread focuses thread buffer")
+assert_eq(vim.api.nvim_win_get_config(legacy_win).relative, "", "legacy open_thread uses normal window")
+assert_bottom_composer(legacy_thread, legacy_win, "legacy open_thread")
+
+vim.cmd("Alma float validate-layout-thread")
+local layout_thread = state.get_thread("validate-layout-thread")
+local layout_bufnr = layout_thread.bufnr
+local float_win = vim.api.nvim_get_current_win()
+local float_cfg = vim.api.nvim_win_get_config(float_win)
+assert_eq(float_cfg.relative, "editor", "Alma float uses editor float")
+assert(float_cfg.width >= math.min(40, vim.o.columns), "Alma float width is sane")
+assert(float_cfg.height >= math.min(12, math.max(1, vim.o.lines - vim.o.cmdheight - 1)), "Alma float height is sane")
+assert(float_cfg.col >= 0 and float_cfg.col + float_cfg.width <= vim.o.columns, "Alma float fits horizontally")
+assert_bottom_composer(layout_thread, float_win, "Alma float")
+
+vim.cmd("Alma float validate-layout-thread")
+assert_eq(state.get_thread("validate-layout-thread").bufnr, layout_bufnr, "Alma float reuses thread buffer")
+assert_eq(vim.api.nvim_get_current_win(), float_win, "Alma float reuses existing float window")
+assert_bottom_composer(layout_thread, float_win, "Alma float reuse")
+
+vim.cmd("Alma sidebar validate-layout-thread")
+local sidebar_win = vim.api.nvim_get_current_win()
+local sidebar_cfg = vim.api.nvim_win_get_config(sidebar_win)
+assert_eq(sidebar_cfg.relative, "", "Alma sidebar uses normal split")
+assert_eq(vim.api.nvim_win_get_buf(sidebar_win), layout_bufnr, "Alma sidebar reuses thread buffer")
+local sidebar_info = vim.fn.getwininfo(sidebar_win)[1] or {}
+for _, win in ipairs(vim.api.nvim_list_wins()) do
+  if win ~= sidebar_win and vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_config(win).relative == "" then
+    local info = vim.fn.getwininfo(win)[1] or {}
+    assert((sidebar_info.wincol or 0) >= (info.wincol or 0), "Alma sidebar is right-biased")
+  end
+end
+assert_bottom_composer(layout_thread, sidebar_win, "Alma sidebar")
+
+vim.cmd("Alma open validate-layout-thread")
+local open_win = vim.api.nvim_get_current_win()
+assert_eq(vim.api.nvim_win_get_config(open_win).relative, "editor", "Alma open defaults to float")
+assert_eq(state.get_thread("validate-layout-thread").bufnr, layout_bufnr, "Alma open reuses thread buffer")
+assert_bottom_composer(layout_thread, open_win, "Alma open")
+
+vim.cmd("Alma toggle validate-layout-thread")
+assert_eq(#thread_visible_windows(layout_thread), 0, "Alma toggle hides visible thread windows")
+vim.cmd("Alma toggle validate-layout-thread")
+local toggle_win = vim.api.nvim_get_current_win()
+assert_eq(state.get_thread("validate-layout-thread").bufnr, layout_bufnr, "Alma toggle reuses thread buffer")
+assert_bottom_composer(layout_thread, toggle_win, "Alma toggle open")
+vim.cmd("Alma toggle validate-layout-thread")
+assert_eq(#thread_visible_windows(layout_thread), 0, "Alma toggle hides reopened thread")
 
 local multi_thread = state.get_thread("validate-window-thread", { cwd = root })
 local multi_bufnr = vim.api.nvim_create_buf(false, true)

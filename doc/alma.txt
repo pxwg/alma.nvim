@@ -18,6 +18,19 @@ Setup~
 
 Commands~
 
+                                                        *:Alma*
+`:Alma open [thread_id]` opens the current or requested Alma thread in the
+default floating layout.
+
+`:Alma toggle [thread_id]` hides the visible Alma window for the current or
+requested thread, or reopens it in the last used layout.
+
+`:Alma float [thread_id]` opens the current or requested Alma thread in a
+floating window.
+
+`:Alma sidebar [thread_id]` opens the current or requested Alma thread in a
+right-side split.
+
                                                         *:AlmaHealth*
 `:AlmaHealth` checks Neovim, curl, and Alma API availability.
 

@@ -1,11 +1,47 @@
 local M = {}
 
+local alma_subcommands = {
+  open = true,
+  toggle = true,
+  float = true,
+  sidebar = true,
+}
+
 local function current_thread_id()
   local thread = require("alma.state").thread_for_buf(0)
   return thread and thread.id or nil
 end
 
 function M.setup()
+  vim.api.nvim_create_user_command("Alma", function(opts)
+    local subcommand = opts.fargs[1] or "open"
+    if subcommand == "" then
+      subcommand = "open"
+    end
+    if not alma_subcommands[subcommand] then
+      error("Unknown Alma subcommand: " .. tostring(subcommand))
+    end
+    local thread_id = opts.fargs[2]
+    require("alma")[subcommand]({ thread_id = thread_id })
+  end, {
+    nargs = "*",
+    complete = function(arg_lead, cmdline)
+      local args = vim.split(cmdline, "%s+", { trimempty = true })
+      if #args <= 2 then
+        local matches = {}
+        for name, _ in pairs(alma_subcommands) do
+          if name:find(arg_lead, 1, true) == 1 then
+            table.insert(matches, name)
+          end
+        end
+        table.sort(matches)
+        return matches
+      end
+      return {}
+    end,
+    desc = "Open, toggle, or choose an Alma chat window layout",
+  })
+
   vim.api.nvim_create_user_command("AlmaHealth", function()
     require("alma.health").command()
   end, { desc = "Check Alma API and alma.nvim runtime health" })

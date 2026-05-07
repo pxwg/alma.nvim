@@ -19,8 +19,54 @@ function M.open_thread(thread_id, opts)
   if not M._setup then
     M.setup()
   end
-  local thread = require("alma.buffers").open_thread(thread_id, opts)
-  require("alma.effects").refresh(thread_id)
+  opts = opts or {}
+  local thread
+  if opts.layout then
+    thread = require("alma.ui.window").open(vim.tbl_extend("force", opts, { thread_id = thread_id }))
+  else
+    thread = require("alma.buffers").open_thread(thread_id, opts)
+  end
+  if thread and thread.id then
+    require("alma.effects").refresh(thread.id)
+  end
+  return thread
+end
+
+function M.open(opts)
+  if not M._setup then
+    M.setup()
+  end
+  local thread = require("alma.ui.window").open(opts or {})
+  require("alma.effects").refresh(thread.id)
+  return thread
+end
+
+function M.toggle(opts)
+  if not M._setup then
+    M.setup()
+  end
+  local thread, win = require("alma.ui.window").toggle(opts or {})
+  if thread and thread.id and win then
+    require("alma.effects").refresh(thread.id)
+  end
+  return thread
+end
+
+function M.float(opts)
+  if not M._setup then
+    M.setup()
+  end
+  local thread = require("alma.ui.window").float(opts or {})
+  require("alma.effects").refresh(thread.id)
+  return thread
+end
+
+function M.sidebar(opts)
+  if not M._setup then
+    M.setup()
+  end
+  local thread = require("alma.ui.window").sidebar(opts or {})
+  require("alma.effects").refresh(thread.id)
   return thread
 end
 

@@ -1,13 +1,8 @@
 local config = require("alma.config")
+local tokens = require("alma.ui.tokens")
 local util = require("alma.util")
 
 local M = {}
-
-local static_commands = {
-  ["/new"] = true,
-  ["/stop"] = true,
-  ["/rename"] = true,
-}
 
 local function inherit_request_selection(value)
   if type(value) == "table" then
@@ -17,13 +12,6 @@ local function inherit_request_selection(value)
     return value
   end
   return {}
-end
-
-local function add_request_selection(spec, key, value)
-  if type(spec[key]) ~= "table" then
-    spec[key] = {}
-  end
-  table.insert(spec[key], value)
 end
 
 local function dedup_request_selection(value)
@@ -111,61 +99,17 @@ local function context_for_token(token)
   return nil
 end
 
-local function parse_token(token, spec)
-  if token:sub(1, 1) == "/" then
-    if static_commands[token] then
-      spec.command = token:sub(2)
-      return true
-    end
-    local skill = token:match("^/skill:(.+)$")
-    if skill then
-      add_request_selection(spec, "skills", skill)
-      return true
-    end
-    return false
+local function parse_token(token, spec, thread)
+  local prefix = token:sub(1, 1)
+  if prefix == "/" or prefix == "@" or prefix == "$" then
+    local ok = tokens.parse_into_spec(token, spec, {
+      thread = thread,
+      accept_unknown_mentions = true,
+    })
+    return ok == true
   end
 
-  if token:sub(1, 1) == "@" then
-    local mcp = token:match("^@mcp:(.+)$")
-    if mcp then
-      add_request_selection(spec, "mcp_servers", mcp)
-      return true
-    end
-    local group = token:match("^@group:(.+)$")
-    if group then
-      table.insert(spec.tool_groups, group)
-      return true
-    end
-    add_request_selection(spec, "tools", token:sub(2))
-    return true
-  end
-
-  if token:sub(1, 1) == "$" then
-    local model = token:match("^%$model:%s*(.+)$")
-    if model then
-      spec.model = util.trim(model)
-      spec.model_override = true
-      return true
-    end
-    local reasoning = token:match("^%$reasoning:%s*(.+)$")
-    if reasoning then
-      spec.reasoning_effort = util.trim(reasoning)
-      spec.reasoning_override = true
-      return true
-    end
-    local temp = token:match("^%$temp:%s*(.+)$")
-    if temp then
-      spec.temperature = tonumber(temp)
-      return true
-    end
-    if token == "$no-tools" then
-      spec.no_tools = true
-      return true
-    end
-    return false
-  end
-
-  if token:sub(1, 1) == ">" then
+  if prefix == ">" then
     local context = context_for_token(token)
     if context then
       table.insert(spec.ephemeral_context, context)
@@ -207,7 +151,7 @@ function M.parse_input(lines, thread)
     local trimmed = util.trim(line)
     local token = trimmed:match("^([/@$>].*)$")
     if token then
-      if not parse_token(token, spec) then
+      if not parse_token(token, spec, thread) then
         table.insert(spec.warnings, "Unknown Alma token kept in prompt: " .. token)
         table.insert(prompt_lines, line)
       end

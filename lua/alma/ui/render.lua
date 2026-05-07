@@ -1,5 +1,7 @@
 local config = require("alma.config")
 local events = require("alma.events")
+local metadata = require("alma.ui.metadata")
+local tokens = require("alma.ui.tokens")
 local util = require("alma.util")
 
 local M = {}
@@ -25,6 +27,32 @@ local assistant_content_types = {
   ErrorBlock = true,
 }
 
+local composer_token_prefixes = {
+  ["/"] = true,
+  ["@"] = true,
+  ["$"] = true,
+}
+
+local composer_trailing_punctuation = {
+  [","] = true,
+  ["."] = true,
+  [";"] = true,
+  ["!"] = true,
+  ["?"] = true,
+  [")"] = true,
+  ["]"] = true,
+  ["}"] = true,
+}
+
+local stream_decoration_by_type = {
+  ToolCallBlock = { kind = "tool", marker = "▌ ", hl_group = "AlmaStreamTool" },
+  ToolOutputBlock = { kind = "tool", marker = "▌ ", hl_group = "AlmaStreamTool" },
+  AgentTimelineBlock = { kind = "timeline", marker = "▎ ", hl_group = "AlmaStreamTimeline" },
+  RawEventBlock = { kind = "raw_event", marker = "╎ ", hl_group = "AlmaStreamRaw" },
+}
+
+local subagent_decoration = { kind = "subagent", marker = "▸ ", hl_group = "AlmaStreamSubAgent" }
+
 local function setup_highlights()
   vim.api.nvim_set_hl(0, "AlmaHeaderUser", { default = true, link = "Identifier" })
   vim.api.nvim_set_hl(0, "AlmaHeaderAssistant", { default = true, link = "Title" })
@@ -34,6 +62,13 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, "AlmaLoading", { default = true, link = "DiagnosticInfo" })
   vim.api.nvim_set_hl(0, "AlmaReasoningText", { default = true, link = "Comment" })
   vim.api.nvim_set_hl(0, "AlmaReasoningBorder", { default = true, link = "DiagnosticHint" })
+  vim.api.nvim_set_hl(0, "AlmaComposerCommand", { default = true, link = "Statement" })
+  vim.api.nvim_set_hl(0, "AlmaComposerMention", { default = true, link = "Identifier" })
+  vim.api.nvim_set_hl(0, "AlmaComposerSelector", { default = true, link = "Constant" })
+  vim.api.nvim_set_hl(0, "AlmaStreamTool", { default = true, link = "DiagnosticInfo" })
+  vim.api.nvim_set_hl(0, "AlmaStreamTimeline", { default = true, link = "DiagnosticHint" })
+  vim.api.nvim_set_hl(0, "AlmaStreamRaw", { default = true, link = "DiagnosticWarn" })
+  vim.api.nvim_set_hl(0, "AlmaStreamSubAgent", { default = true, link = "DiagnosticOk" })
 end
 
 local function add(lines, value)
@@ -69,6 +104,121 @@ local function stringify(value)
   return vim.inspect(value)
 end
 
+local function first_string(...)
+  for index = 1, select("#", ...) do
+    local value = select(index, ...)
+    if type(value) == "string" and value ~= "" then
+      return value
+    end
+  end
+  return nil
+end
+
+local function normalize_key(value)
+  if type(value) ~= "string" then
+    return ""
+  end
+  return value:gsub("[^%w]", ""):lower()
+end
+
+local function is_subagent_value(value)
+  local normalized = normalize_key(value)
+  return normalized == "subagent" or vim.startswith(normalized, "subagent")
+end
+
+local function is_subagent_block_type(value)
+  local normalized = normalize_key(value)
+  return vim.startswith(normalized, "subagent") and normalized:match("block$") ~= nil
+end
+
+local function is_subagent_event_name(value)
+  return is_subagent_value(value)
+end
+
+local subagent_metadata_keys = {
+  subagent = true,
+  subagentid = true,
+  subagentname = true,
+  subagentrole = true,
+  subagenttype = true,
+  subagentmodel = true,
+}
+
+local subagent_value_keys = {
+  kind = true,
+  origin = true,
+  role = true,
+  source = true,
+  stream = true,
+  type = true,
+}
+
+local function metadata_has_subagent_signal(value)
+  if type(value) ~= "table" then
+    return false
+  end
+  for key, item in pairs(value) do
+    local normalized_key = normalize_key(key)
+    if subagent_metadata_keys[normalized_key] then
+      if item ~= false and item ~= nil and item ~= "" then
+        return true
+      end
+    end
+    if subagent_value_keys[normalized_key] and is_subagent_value(item) then
+      return true
+    end
+  end
+  return false
+end
+
+local function event_name_from(value)
+  if type(value) ~= "table" then
+    return nil
+  end
+  return first_string(value.event_type, value.eventType, value.event_name, value.eventName, value.name, value.event, value.type)
+end
+
+local function block_has_subagent_signal(block)
+  if type(block) ~= "table" then
+    return false
+  end
+  if is_subagent_block_type(block.type) then
+    return true
+  end
+  if is_subagent_event_name(first_string(block.event_type, block.eventType, block.event_name, block.eventName, block.name)) then
+    return true
+  end
+  if metadata_has_subagent_signal(block.metadata) then
+    return true
+  end
+  local raw = block.raw
+  if type(raw) ~= "table" then
+    return false
+  end
+  if is_subagent_event_name(event_name_from(raw)) then
+    return true
+  end
+  local data = type(raw.data) == "table" and raw.data or {}
+  return metadata_has_subagent_signal(raw.metadata)
+    or metadata_has_subagent_signal(raw.userMessageMetadata)
+    or metadata_has_subagent_signal(raw.context)
+    or metadata_has_subagent_signal(data)
+    or metadata_has_subagent_signal(data.context)
+end
+
+local function stream_decoration_for_block(block)
+  if not block or block.type == "ReasoningBlock" then
+    return nil
+  end
+  if block.type ~= "RawEventBlock" and stream_decoration_by_type[block.type] then
+    return stream_decoration_by_type[block.type]
+  end
+  if block_has_subagent_signal(block) then
+    return subagent_decoration
+  end
+  return stream_decoration_by_type[block.type]
+end
+
 local function is_long(text)
   local opts = config.get()
   if #text > opts.long_output_bytes then
@@ -78,51 +228,31 @@ local function is_long(text)
   return count + 1 > opts.long_output_lines
 end
 
-local function model_label(value)
-  value = tostring(value or "")
-  if value == "" then
-    return nil
-  end
-  return value:match("([^:]+)$") or value
-end
-
-local function context_label(thread, block)
-  if block and block.context_count and block.context_count > 0 then
-    return "ctx " .. tostring(block.context_count)
-  end
-  local usage = thread.context_usage
-  if type(usage) ~= "table" then
-    return nil
-  end
-  local used = usage.used or usage.tokens or usage.inputTokens
-  local total = usage.total or usage.limit or usage.max
-  if used and total then
-    return "ctx " .. tostring(used) .. "/" .. tostring(total)
-  end
-  if used then
-    return "ctx " .. tostring(used)
-  end
-  return nil
-end
-
 local function assistant_meta(thread, block)
-  local meta = {}
-  local request = thread.pending_request
-  local model = block and block.request_model or request and request.spec and request.spec.model or thread.config.model
-  local reasoning = block and block.request_reasoning_effort
-    or request and request.spec and request.spec.reasoning_effort
-    or thread.config.reasoning_effort
-  local model_name = model_label(model)
-  if model_name then
-    table.insert(meta, model_name)
+  local request = block and block.local_only and thread.pending_request or nil
+  return metadata.assistant_labels(thread, block, request)
+end
+
+local function user_meta(thread, block)
+  local request = block and block.local_only and thread.pending_request or nil
+  local labels = metadata.user_labels(thread, block, request)
+  if block and block.state and block.state ~= "" then
+    table.insert(labels, tostring(block.state))
   end
-  if reasoning and reasoning ~= "" then
-    table.insert(meta, "effort " .. tostring(reasoning))
+  local ctx = metadata.context_label(thread, block)
+  if ctx then
+    table.insert(labels, ctx)
   end
-  if block and block.state and block.state ~= "" and block.state ~= "done" then
-    table.insert(meta, tostring(block.state))
+  return labels
+end
+
+local function composer_meta(thread)
+  local labels = metadata.composer_labels(thread)
+  local ctx = metadata.context_label(thread)
+  if ctx then
+    table.insert(labels, ctx)
   end
-  return meta
+  return labels
 end
 
 local function header_hl(kind)
@@ -152,6 +282,20 @@ local function mark_reasoning_lines(thread, start_line, finish_line)
   table.insert(thread.reasoning_marks, {
     start_line = start_line,
     finish_line = finish_line,
+  })
+end
+
+local function mark_stream_decoration(thread, start_line, finish_line, decoration, block)
+  if not decoration or finish_line < start_line then
+    return
+  end
+  table.insert(thread.stream_decoration_marks, {
+    start_line = start_line,
+    finish_line = finish_line,
+    kind = decoration.kind,
+    marker = decoration.marker,
+    hl_group = decoration.hl_group,
+    block = block,
   })
 end
 
@@ -238,6 +382,120 @@ local function apply_reasoning_marks(thread, bufnr)
   end
 end
 
+local function apply_stream_decoration_marks(thread, bufnr)
+  for _, mark in ipairs(thread.stream_decoration_marks or {}) do
+    for lnum = mark.start_line, mark.finish_line do
+      vim.api.nvim_buf_set_extmark(bufnr, ns, lnum - 1, 0, {
+        virt_text = { { mark.marker, mark.hl_group } },
+        virt_text_pos = "inline",
+        priority = 1100,
+        strict = false,
+      })
+    end
+  end
+end
+
+local function composer_token_hl(classified)
+  if not classified or not classified.valid or classified.fallback then
+    return nil
+  end
+  if classified.kind == "slash_command" or classified.kind == "skill" then
+    return "AlmaComposerCommand"
+  end
+  if classified.kind == "mention" then
+    return "AlmaComposerMention"
+  end
+  if classified.kind == "selector" then
+    return "AlmaComposerSelector"
+  end
+  return nil
+end
+
+local function composer_token_boundary(line, index)
+  if index <= 1 then
+    return true
+  end
+  return line:sub(index - 1, index - 1):match("%s") ~= nil
+end
+
+local function composer_candidate_end(line, index)
+  local pos = index
+  while pos <= #line do
+    if line:sub(pos, pos):match("%s") then
+      break
+    end
+    pos = pos + 1
+  end
+  return pos - 1
+end
+
+local function trim_composer_candidate(raw)
+  local finish = #raw
+  while finish > 1 and composer_trailing_punctuation[raw:sub(finish, finish)] do
+    finish = finish - 1
+  end
+  return raw:sub(1, finish)
+end
+
+local function next_composer_candidate(line, start_index)
+  local index = start_index
+  while index <= #line do
+    local ch = line:sub(index, index)
+    if composer_token_prefixes[ch] and composer_token_boundary(line, index) then
+      local raw_finish = composer_candidate_end(line, index)
+      local token = trim_composer_candidate(line:sub(index, raw_finish))
+      if #token > 1 then
+        return index, index + #token - 1, token, raw_finish + 1
+      end
+      index = raw_finish + 1
+    else
+      index = index + 1
+    end
+  end
+  return nil
+end
+
+local function apply_composer_token_marks(thread, bufnr)
+  thread.composer_token_marks = {}
+  if not thread.prompt_start then
+    return
+  end
+
+  local lines = vim.api.nvim_buf_get_lines(bufnr, thread.prompt_start, -1, false)
+  for offset, line in ipairs(lines) do
+    local lnum0 = thread.prompt_start + offset - 1
+    local search_from = 1
+    while search_from <= #line do
+      local start_col1, finish_col1, token, next_index = next_composer_candidate(line, search_from)
+      if not start_col1 then
+        break
+      end
+
+      local classified = tokens.classify(token, { thread = thread })
+      local hl_group = composer_token_hl(classified)
+      if hl_group then
+        vim.api.nvim_buf_set_extmark(bufnr, ns, lnum0, start_col1 - 1, {
+          end_col = finish_col1,
+          hl_group = hl_group,
+          hl_mode = "combine",
+          priority = 1300,
+          strict = false,
+        })
+        table.insert(thread.composer_token_marks, {
+          line = lnum0 + 1,
+          col = start_col1 - 1,
+          end_col = finish_col1,
+          token = token,
+          kind = classified.kind,
+          hl_group = hl_group,
+        })
+      end
+
+      search_from = next_index
+    end
+  end
+end
+
 local function render_tool(thread, lines, block)
   local title = "Tool: " .. tostring(block.tool or "unknown")
   if block.state then
@@ -270,15 +528,7 @@ local function render_block(thread, lines, block, opts)
   local start = #lines + 1
   if block.type == "UserBlock" then
     local line = add(lines, "## You")
-    local meta = {}
-    if block.state and block.state ~= "" then
-      table.insert(meta, tostring(block.state))
-    end
-    local ctx = context_label(thread, block)
-    if ctx then
-      table.insert(meta, ctx)
-    end
-    mark_header(thread, line, "user", "You", meta, block)
+    mark_header(thread, line, "user", "You", user_meta(thread, block), block)
     add_text(lines, block.text)
   elseif block.type == "AssistantBlock" then
     if not opts.assistant_body then
@@ -323,6 +573,11 @@ local function render_block(thread, lines, block, opts)
   end
   if foldable_types[block.type] and finish > start then
     table.insert(thread.folds, { start = start, finish = finish })
+  end
+  local stream_decoration = stream_decoration_for_block(block)
+  if stream_decoration then
+    local decoration_start = finish > start and start + 1 or start
+    mark_stream_decoration(thread, decoration_start, finish, stream_decoration, block)
   end
   add(lines, "")
 end
@@ -654,6 +909,8 @@ function M.render(thread)
   thread.render_index = {}
   thread.header_marks = {}
   thread.reasoning_marks = {}
+  thread.stream_decoration_marks = {}
+  thread.composer_token_marks = {}
   thread.folds = {}
 
   local lines = {}
@@ -674,7 +931,7 @@ function M.render(thread)
   end
 
   local line = add(lines, config.get().render.prompt_marker)
-  mark_header(thread, line, "user", "You", {}, nil)
+  mark_header(thread, line, "user", "You", composer_meta(thread), nil)
   local prompt_start = #lines
   for _, prompt_line in ipairs(#prompt > 0 and prompt or { "" }) do
     add(lines, prompt_line)
@@ -686,14 +943,17 @@ function M.render(thread)
   vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
   apply_header_marks(thread, bufnr)
   apply_reasoning_marks(thread, bufnr)
+  apply_stream_decoration_marks(thread, bufnr)
+  apply_composer_token_marks(thread, bufnr)
   vim.bo[bufnr].modifiable = true
 
   local virt = {
-    { "model: " .. tostring(model_label(thread.config.model) or "default"), "Comment" },
+    { "model: " .. tostring(metadata.model_label(thread.config.model) or "default"), "Comment" },
     { " / reasoning: " .. tostring(thread.config.reasoning_effort or "default"), "Comment" },
   }
-  if thread.context_usage then
-    table.insert(virt, { " / " .. tostring(context_label(thread) or "context"), "Comment" })
+  local ctx = metadata.context_label(thread)
+  if ctx then
+    table.insert(virt, { " / " .. tostring(ctx), "Comment" })
   end
   vim.api.nvim_buf_set_extmark(bufnr, ns, 0, 0, {
     virt_text = virt,
