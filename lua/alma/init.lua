@@ -1,5 +1,7 @@
 local config = require("alma.config")
+local rest = require("alma.rest")
 local util = require("alma.util")
+local workspace = require("alma.workspace")
 
 local M = {}
 
@@ -20,16 +22,60 @@ function M.open_thread(thread_id, opts)
     M.setup()
   end
   opts = opts or {}
-  local thread
-  if opts.layout then
-    thread = require("alma.ui.window").open(vim.tbl_extend("force", opts, { thread_id = thread_id }))
-  else
-    thread = require("alma.buffers").open_thread(thread_id, opts)
+  if not thread_id or thread_id == "" then
+    util.notify("Use :Alma new for a new project thread, or :Alma pick to choose one in this project.", vim.log.levels.WARN)
+    return nil
   end
+  local thread = require("alma.ui.window").open(vim.tbl_extend("force", opts, { thread_id = thread_id }))
   if thread and thread.id then
     require("alma.effects").refresh(thread.id)
   end
   return thread
+end
+
+function M.new_thread(opts)
+  if not M._setup then
+    M.setup()
+  end
+  opts = opts or {}
+  workspace.ensure(opts.bufnr or vim.api.nvim_get_current_buf(), function(current_workspace, err)
+    if not current_workspace then
+      workspace.notify_error("resolution", err)
+      return
+    end
+    local defaults = config.get()
+    rest.create_thread({
+      title = opts.title or "New Chat",
+      workspace_id = current_workspace.id,
+      path = current_workspace.path,
+      model = opts.model ~= nil and opts.model or defaults.model,
+      reasoning_effort = opts.reasoning_effort ~= nil and opts.reasoning_effort or defaults.reasoning_effort,
+    }, function(thread_data, create_err)
+      if not thread_data then
+        util.notify("Unable to create Alma thread: " .. tostring(create_err), vim.log.levels.ERROR)
+        return
+      end
+      local thread = require("alma.ui.window").open(vim.tbl_extend("force", opts, {
+        thread_id = thread_data.id,
+        workspace_id = current_workspace.id,
+        cwd = current_workspace.path,
+        workspace = current_workspace,
+        model = opts.model ~= nil and opts.model or defaults.model,
+        reasoning_effort = opts.reasoning_effort ~= nil and opts.reasoning_effort or defaults.reasoning_effort,
+      }))
+      if thread then
+        thread.title = thread_data.title or thread.title
+        require("alma.effects").refresh(thread.id)
+      end
+    end)
+  end)
+end
+
+function M.pick_thread(opts)
+  if not M._setup then
+    M.setup()
+  end
+  require("alma.pickers").threads(vim.tbl_extend("force", { scope = "workspace" }, opts or {}))
 end
 
 function M.open(opts)

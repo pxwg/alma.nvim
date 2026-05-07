@@ -13,8 +13,9 @@ local function default_thread(id, opts)
   return {
     id = id,
     bufnr = opts.bufnr,
-    cwd = opts.cwd or config.resolve_cwd(opts.bufnr or 0),
-    workspace_id = opts.workspace_id,
+    cwd = opts.cwd or (opts.workspace and opts.workspace.path) or config.resolve_cwd(opts.bufnr or 0),
+    workspace_id = opts.workspace_id or opts.workspaceId or (opts.workspace and opts.workspace.id),
+    workspace = opts.workspace,
     title = opts.title or ("Alma " .. tostring(id)),
 
     transport = "offline",
@@ -24,8 +25,8 @@ local function default_thread(id, opts)
     visibility = "visible",
 
     config = {
-      model = opts.model,
-      reasoning_effort = opts.reasoning_effort,
+      model = opts.model ~= nil and opts.model or config.get().model,
+      reasoning_effort = opts.reasoning_effort ~= nil and opts.reasoning_effort or config.get().reasoning_effort,
       tools = opts.tools or {},
       skills = opts.skills or {},
       mcp_servers = opts.mcp_servers or {},
@@ -64,8 +65,15 @@ function M.get_thread(id, opts)
   if not M.threads[id] then
     M.threads[id] = default_thread(id, opts)
   elseif opts then
-    M.threads[id].cwd = opts.cwd or M.threads[id].cwd
-    M.threads[id].workspace_id = opts.workspace_id or M.threads[id].workspace_id
+    M.threads[id].cwd = opts.cwd or (opts.workspace and opts.workspace.path) or M.threads[id].cwd
+    M.threads[id].workspace_id = opts.workspace_id or opts.workspaceId or (opts.workspace and opts.workspace.id) or M.threads[id].workspace_id
+    M.threads[id].workspace = opts.workspace or M.threads[id].workspace
+    if opts.model ~= nil then
+      M.threads[id].config.model = opts.model
+    end
+    if opts.reasoning_effort ~= nil then
+      M.threads[id].config.reasoning_effort = opts.reasoning_effort
+    end
   end
   return M.threads[id]
 end
@@ -84,6 +92,7 @@ function M.bind_buffer(thread, bufnr)
   M.buffers[bufnr] = thread.id
   vim.b[bufnr].alma_thread_id = thread.id
   vim.b[bufnr].alma_workspace_id = thread.workspace_id
+  vim.b[bufnr].alma_workspace_path = thread.workspace and thread.workspace.path or thread.cwd
   vim.b[bufnr].alma_cwd = thread.cwd
 end
 

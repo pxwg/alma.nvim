@@ -1,6 +1,9 @@
 local M = {}
 
 local alma_subcommands = {
+  new = true,
+  pick = true,
+  threads = true,
   open = true,
   toggle = true,
   float = true,
@@ -14,15 +17,25 @@ end
 
 function M.setup()
   vim.api.nvim_create_user_command("Alma", function(opts)
-    local subcommand = opts.fargs[1] or "open"
+    local subcommand = opts.fargs[1] or "new"
     if subcommand == "" then
-      subcommand = "open"
+      subcommand = "new"
     end
     if not alma_subcommands[subcommand] then
       error("Unknown Alma subcommand: " .. tostring(subcommand))
     end
-    local thread_id = opts.fargs[2]
-    require("alma")[subcommand]({ thread_id = thread_id })
+    local alma = require("alma")
+    if subcommand == "new" then
+      local title = table.concat(vim.list_slice(opts.fargs, 2), " ")
+      alma.new_thread({ title = title ~= "" and title or nil })
+    elseif subcommand == "pick" or subcommand == "threads" then
+      alma.pick_thread()
+    elseif subcommand == "open" then
+      alma.open_thread(opts.fargs[2])
+    else
+      local thread_id = opts.fargs[2]
+      alma[subcommand]({ thread_id = thread_id })
+    end
   end, {
     nargs = "*",
     complete = function(arg_lead, cmdline)
@@ -39,7 +52,7 @@ function M.setup()
       end
       return {}
     end,
-    desc = "Open, toggle, or choose an Alma chat window layout",
+    desc = "Create, pick, open, toggle, or choose an Alma chat window layout",
   })
 
   vim.api.nvim_create_user_command("AlmaHealth", function()
@@ -53,7 +66,7 @@ function M.setup()
     complete = function()
       return {}
     end,
-    desc = "Open an Alma thread buffer",
+    desc = "Open an Alma thread with the configured Alma layout",
   })
 
   vim.api.nvim_create_user_command("AlmaThreadRefresh", function()
@@ -78,8 +91,12 @@ function M.setup()
   end, { desc = "Stop current Alma generation" })
 
   vim.api.nvim_create_user_command("AlmaThreads", function()
-    require("alma.pickers").threads()
-  end, { desc = "Pick an Alma thread" })
+    require("alma.pickers").threads({ scope = "workspace" })
+  end, { desc = "Pick an Alma thread in the current workspace" })
+
+  vim.api.nvim_create_user_command("AlmaThreadsGlobal", function()
+    require("alma.pickers").threads({ scope = "global" })
+  end, { desc = "Pick an Alma thread across all workspaces" })
 
   vim.api.nvim_create_user_command("AlmaProjects", function()
     require("alma.pickers").projects()

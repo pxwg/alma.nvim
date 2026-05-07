@@ -6,6 +6,32 @@ local M = {}
 
 local group = vim.api.nvim_create_augroup("alma.nvim.buffers", { clear = true })
 local view_autocmds_setup = false
+local window_snapshots = {}
+
+local restorable_window_options = {
+  "number",
+  "relativenumber",
+  "signcolumn",
+  "foldcolumn",
+  "wrap",
+  "linebreak",
+  "foldmethod",
+  "foldexpr",
+  "foldlevel",
+  "conceallevel",
+}
+
+local alma_window_options = {
+  number = false,
+  relativenumber = false,
+  signcolumn = "no",
+  foldcolumn = "0",
+  wrap = true,
+  linebreak = true,
+  foldmethod = "expr",
+  foldexpr = "v:lua.AlmaFoldExpr(v:lnum)",
+  foldlevel = 0,
+}
 
 local function setup_view_autocmds()
   if view_autocmds_setup then
@@ -27,6 +53,50 @@ local function setup_view_autocmds()
       end
     end,
   })
+  vim.api.nvim_create_autocmd("WinClosed", {
+    group = group,
+    callback = function(event)
+      window_snapshots[tonumber(event.match)] = nil
+    end,
+  })
+end
+
+function M.apply_window_options(win, bufnr)
+  win = win or vim.api.nvim_get_current_win()
+  if not win or not vim.api.nvim_win_is_valid(win) then
+    return
+  end
+  bufnr = bufnr or vim.api.nvim_win_get_buf(win)
+  if not bufnr or not state.thread_for_buf(bufnr) or vim.api.nvim_win_get_buf(win) ~= bufnr then
+    return
+  end
+  if not window_snapshots[win] then
+    local snapshot = {}
+    for _, option in ipairs(restorable_window_options) do
+      snapshot[option] = vim.wo[win][option]
+    end
+    window_snapshots[win] = snapshot
+  end
+  for option, value in pairs(alma_window_options) do
+    vim.wo[win][option] = value
+  end
+  vim.wo[win].conceallevel = math.max(vim.wo[win].conceallevel, 1)
+end
+
+function M.restore_window_options(win)
+  win = win or vim.api.nvim_get_current_win()
+  local snapshot = win and window_snapshots[win]
+  if not snapshot then
+    return
+  end
+  if vim.api.nvim_win_is_valid(win) then
+    for _, option in ipairs(restorable_window_options) do
+      pcall(function()
+        vim.wo[win][option] = snapshot[option]
+      end)
+    end
+  end
+  window_snapshots[win] = nil
 end
 
 local function setup_buffer_autocmds(bufnr, thread_id)
@@ -35,10 +105,19 @@ local function setup_buffer_autocmds(bufnr, thread_id)
     group = group,
     buffer = bufnr,
     callback = function()
+      M.apply_window_options(vim.api.nvim_get_current_win(), bufnr)
       require("alma.effects").dispatch(thread_id, { type = "buffer_visible" })
     end,
   })
-  vim.api.nvim_create_autocmd({ "BufHidden", "BufWinLeave" }, {
+  vim.api.nvim_create_autocmd("BufWinLeave", {
+    group = group,
+    buffer = bufnr,
+    callback = function()
+      M.restore_window_options(vim.api.nvim_get_current_win())
+      require("alma.effects").dispatch(thread_id, { type = "buffer_hidden" })
+    end,
+  })
+  vim.api.nvim_create_autocmd("BufHidden", {
     group = group,
     buffer = bufnr,
     callback = function()
@@ -67,9 +146,11 @@ end
 
 function M.ensure_thread(thread_id, opts)
   opts = opts or {}
+  local workspace = opts.workspace or (opts.workspace_id and { id = opts.workspace_id, path = opts.cwd }) or config.resolve_workspace(0)
   local thread = state.get_thread(thread_id, {
-    cwd = opts.cwd or config.resolve_cwd(0),
-    workspace_id = opts.workspace_id,
+    cwd = opts.cwd or workspace.path,
+    workspace_id = opts.workspace_id or workspace.id,
+    workspace = workspace,
   })
 
   if thread.bufnr and vim.api.nvim_buf_is_valid(thread.bufnr) then
@@ -81,10 +162,10 @@ function M.ensure_thread(thread_id, opts)
   vim.bo[bufnr].buftype = "nofile"
   vim.bo[bufnr].bufhidden = "hide"
   vim.bo[bufnr].swapfile = false
-  vim.bo[bufnr].filetype = "alma"
-  vim.bo[bufnr].modifiable = true
-  vim.bo[bufnr].undolevels = -1
+  vim.bo[bufnr].undofile = false
   state.bind_buffer(thread, bufnr)
+  vim.bo[bufnr].filetype = "markdown"
+  vim.bo[bufnr].modifiable = true
   setup_buffer_autocmds(bufnr, thread_id)
   require("alma.ui.render").render(thread)
   return thread
@@ -139,8 +220,8 @@ function M.submit_current(args)
     require("alma.effects").stop(thread.id)
     return
   end
-  if spec.prompt == "" then
-    util.notify("Alma tokens parsed, but no user prompt remains", vim.log.levels.WARN)
+  if spec.prompt == "" and #(spec.images or {}) == 0 then
+    util.notify("Alma tokens parsed, but no user prompt or image remains", vim.log.levels.WARN)
     return
   end
 

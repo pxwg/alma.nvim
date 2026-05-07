@@ -12,13 +12,28 @@ local defaults = {
   long_output_lines = 80,
   long_output_bytes = 12000,
   notify = true,
-  resolve_cwd = function(bufnr)
-    return vim.fs.root(bufnr, { ".git", "zk-lsp.toml" }) or vim.fn.getcwd(-1, -1)
+  model = nil,
+  reasoning_effort = nil,
+  window_layout = "float",
+  resolve_workspace = function(ctx)
+    local path = ctx.git_root or ctx.cwd or ctx.file_dir
+    if not path or path == "" then
+      path = vim.fn.getcwd(-1, -1)
+    end
+    return {
+      path = path,
+      name = vim.fn.fnamemodify(path, ":t"),
+    }
   end,
   render = {
     show_raw_events = true,
     prompt_marker = "## You",
     separator = "───",
+    tool_outputs = {
+      mode = "smart",
+      fallback = "raw",
+      renderers = {},
+    },
   },
 }
 
@@ -29,7 +44,17 @@ local function strip_trailing_slash(value)
 end
 
 function M.setup(opts)
-  options = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
+  opts = opts or {}
+  if opts.resolve_cwd and not opts.resolve_workspace then
+    local resolve_cwd = opts.resolve_cwd
+    opts = vim.tbl_extend("force", opts, {
+      resolve_workspace = function(ctx)
+        local path = resolve_cwd(ctx.bufnr)
+        return { path = path, name = path and vim.fn.fnamemodify(path, ":t") or nil }
+      end,
+    })
+  end
+  options = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts)
   if type(options.api_url) == "function" then
     options.api_url = options.api_url()
   end
@@ -65,13 +90,54 @@ function M.ws_url()
   return "ws://" .. base .. "/ws/threads"
 end
 
-function M.resolve_cwd(bufnr)
-  bufnr = bufnr or vim.api.nvim_get_current_buf()
-  local ok, cwd = pcall(options.resolve_cwd, bufnr)
-  if ok and cwd and cwd ~= "" then
-    return cwd
+local function normalize_workspace(value, fallback_path)
+  if type(value) == "string" then
+    value = { path = value }
+  elseif type(value) ~= "table" then
+    value = {}
   end
-  return vim.fn.getcwd(-1, -1)
+
+  local path = value.path or value.cwd or value.root or fallback_path or vim.fn.getcwd(-1, -1)
+  path = vim.fn.fnamemodify(path, ":p")
+  path = strip_trailing_slash(path)
+  return {
+    id = value.id or value.workspace_id or value.workspaceId,
+    name = value.name or vim.fn.fnamemodify(path, ":t"),
+    path = path,
+  }
+end
+
+local function workspace_context(bufnr)
+  bufnr = bufnr or vim.api.nvim_get_current_buf()
+  local file = vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_get_name(bufnr) or ""
+  local file_dir = file ~= "" and vim.fn.fnamemodify(file, ":p:h") or nil
+  local cwd = vim.fn.getcwd(-1, -1)
+  local git_root
+  local ok, root = pcall(vim.fs.root, bufnr, { ".git" })
+  if ok and root and root ~= "" then
+    git_root = root
+  end
+  return {
+    bufnr = bufnr,
+    file = file ~= "" and file or nil,
+    file_dir = file_dir,
+    cwd = cwd,
+    git_root = git_root,
+  }
+end
+
+function M.resolve_workspace(bufnr)
+  local ctx = workspace_context(bufnr)
+  local ok, workspace = pcall(options.resolve_workspace, ctx)
+  if not ok then
+    require("alma.util").notify("Alma workspace resolver failed: " .. tostring(workspace), vim.log.levels.ERROR)
+    workspace = nil
+  end
+  return normalize_workspace(workspace, ctx.git_root or ctx.cwd or ctx.file_dir)
+end
+
+function M.resolve_cwd(bufnr)
+  return M.resolve_workspace(bufnr).path
 end
 
 return M
