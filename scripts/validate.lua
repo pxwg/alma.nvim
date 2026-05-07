@@ -1234,21 +1234,17 @@ thread.streaming_text = nil
 thread.blocks = {}
 thread.local_blocks = {
   { type = "UserBlock", text = "Test", local_only = true },
-  { type = "AssistantBlock", text = "⏳ Alma is thinking...", state = "loading", local_only = true },
 }
 render.render(thread)
 local locked_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 local you_positions = {}
 local old_heading_count = 0
-local loading_line
-local alma_line
+local spinner_line_pos
 for index, line in ipairs(locked_lines) do
   if line == "## You" then
     table.insert(you_positions, index)
-  elseif line == "## Alma" then
-    alma_line = index
-  elseif line == "⏳ Alma is thinking..." then
-    loading_line = index
+  elseif line:find("Alma streaming", 1, true) then
+    spinner_line_pos = index
   end
   if line:match("^## You %[") or line:match("^## Alma %[") then
     old_heading_count = old_heading_count + 1
@@ -1257,13 +1253,12 @@ end
 local composer_line = you_positions[#you_positions]
 assert_eq(#you_positions, 2, "submitted render keeps submitted user block and bottom composer")
 assert_eq(locked_lines[#locked_lines - 1], "## You", "submitted render keeps bottom composer")
-assert(alma_line and loading_line and alma_line < loading_line, "submitted assistant loading has Alma heading")
-assert(loading_line and composer_line and loading_line < composer_line, "submitted assistant loading renders before composer")
+assert(not vim.tbl_contains(locked_lines, "⏳ Alma is thinking..."), "submitted render omits redundant loading assistant block")
+assert(not vim.tbl_contains(locked_lines, "## Alma"), "submitted render omits empty Alma section before streaming")
+assert(spinner_line_pos and spinner_line_pos < composer_line, "submitted render keeps spinner before composer")
 assert_eq(old_heading_count, 0, "submitted render avoids legacy state headings")
 assert_header_contains(bufnr, render_ns, you_positions[1], "test-model", "submitted user header model")
 assert_header_contains(bufnr, render_ns, you_positions[1], "effort xhigh", "submitted user header reasoning")
-assert_header_contains(bufnr, render_ns, alma_line, "test-model", "active assistant header model")
-assert_header_contains(bufnr, render_ns, alma_line, "effort xhigh", "active assistant header reasoning")
 assert_header_contains(bufnr, render_ns, composer_line, "test-model", "active composer header model")
 assert_header_contains(bufnr, render_ns, composer_line, "effort xhigh", "active composer header reasoning")
 assert_eq(vim.bo[bufnr].modifiable, true, "generating chat buffer remains editable")

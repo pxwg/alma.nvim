@@ -195,7 +195,6 @@ local function active_blocks(thread, request)
   if has_persisted_response then
     return blocks
   end
-  local has_stream = false
   if thread.streaming_reasoning_text and thread.streaming_reasoning_text ~= "" then
     table.insert(blocks, request_assistant_block(request, {
       type = "ReasoningBlock",
@@ -203,22 +202,12 @@ local function active_blocks(thread, request)
       state = "streaming",
       local_only = true,
     }))
-    has_stream = true
   end
   if thread.streaming_text and thread.streaming_text ~= "" then
     table.insert(blocks, request_assistant_block(request, {
       type = "AssistantBlock",
       text = thread.streaming_text,
       state = "streaming",
-      local_only = true,
-    }))
-    has_stream = true
-  end
-  if not has_stream then
-    table.insert(blocks, request_assistant_block(request, {
-      type = "AssistantBlock",
-      text = "⏳ Alma is thinking...",
-      state = "loading",
       local_only = true,
     }))
   end
