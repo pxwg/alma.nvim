@@ -35,7 +35,7 @@ luarocks make alma.nvim-scm-1.rockspec
 - `:AlmaHealth` checks Neovim, `curl`, and the Alma API.
 - `:AlmaThreadOpen <thread_id>` opens a thread buffer and fetches messages.
 - `:AlmaSubmit [prompt]` submits prompt text. Without arguments it submits the
-  editable prompt area at the bottom of an Alma buffer.
+  editable bottom `## You` composer in an Alma buffer.
 - `:AlmaStop` sends `stop_generation` over WebSocket.
 - `:AlmaThreads`, `:AlmaProjects`, `:AlmaBuffers`, `:AlmaEvents` open
   `snacks.picker` navigation.
@@ -81,10 +81,12 @@ Unknown token-only lines are kept in the prompt and surfaced as warnings.
 
 ## Reliability Contract
 
-Submitting a request immediately renders a local user block and assistant
-placeholder. If Alma is already generating for the same thread, the request is
-queued in Neovim and the buffer shows that queued state. Completion or error
-events force REST reconciliation through `GET /api/threads/<id>/messages`.
+Submitting a request turns the bottom `## You` composer into the sent user
+message, renders a single loading Alma response, and locks the buffer until the
+response finishes or reconciles. If Alma is already generating for the same
+thread, the request is queued in Neovim and the buffer shows that queued state.
+Completion or error events force REST reconciliation through
+`GET /api/threads/<id>/messages`.
 
 If no related WebSocket event arrives before the ack timeout, the buffer shows
 that the request was sent and starts REST polling fallback.

@@ -16,7 +16,8 @@ local defaults = {
   end,
   render = {
     show_raw_events = true,
-    prompt_marker = "## Prompt",
+    prompt_marker = "## You",
+    separator = "───",
   },
 }
 

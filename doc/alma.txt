@@ -26,7 +26,7 @@ Commands~
 
                                                         *:AlmaSubmit*
 `:AlmaSubmit [prompt]` sends a prompt through `/ws/threads`. Without arguments,
-it reads the prompt area at the bottom of the current Alma buffer.
+it reads the editable bottom `## You` composer in the current Alma buffer.
 
                                                         *:AlmaStop*
 `:AlmaStop` sends a `stop_generation` WebSocket request for the current thread.
@@ -92,9 +92,10 @@ Token-only prompt lines configure the request:
 
 Reliability~
 
-alma.nvim renders a submitted user block and assistant placeholder before it
-sends the WebSocket request. If the same thread is already generating, the
-request is queued in Neovim and visibly marked as queued. Generation completion
-or failure always reconciles through REST messages.
+alma.nvim turns the bottom `## You` composer into the sent user message,
+renders one loading Alma response, and locks the buffer while generation is in
+flight. If the same thread is already generating, the request is queued in
+Neovim and visibly marked as queued. Generation completion or failure always
+reconciles through REST messages.
 
 vim:tw=78:ts=8:noet:ft=help:norl:

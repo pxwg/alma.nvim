@@ -24,6 +24,15 @@ local assistant_content_types = {
   ErrorBlock = true,
 }
 
+local function setup_highlights()
+  vim.api.nvim_set_hl(0, "AlmaHeaderUser", { default = true, link = "Identifier" })
+  vim.api.nvim_set_hl(0, "AlmaHeaderAssistant", { default = true, link = "Title" })
+  vim.api.nvim_set_hl(0, "AlmaHeaderSection", { default = true, link = "Special" })
+  vim.api.nvim_set_hl(0, "AlmaHeaderMeta", { default = true, link = "Comment" })
+  vim.api.nvim_set_hl(0, "AlmaHeaderSeparator", { default = true, link = "Comment" })
+  vim.api.nvim_set_hl(0, "AlmaLoading", { default = true, link = "DiagnosticInfo" })
+end
+
 local function add(lines, value)
   local text_lines = util.split_lines(value)
   if #text_lines == 0 then
@@ -66,8 +75,108 @@ local function is_long(text)
   return count + 1 > opts.long_output_lines
 end
 
-local function render_tool(lines, block)
-  add(lines, "### Tool: " .. tostring(block.tool or "unknown") .. (block.state and (" [" .. block.state .. "]") or ""))
+local function model_label(value)
+  value = tostring(value or "")
+  if value == "" then
+    return nil
+  end
+  return value:match("([^:]+)$") or value
+end
+
+local function context_label(thread, block)
+  if block and block.context_count and block.context_count > 0 then
+    return "ctx " .. tostring(block.context_count)
+  end
+  local usage = thread.context_usage
+  if type(usage) ~= "table" then
+    return nil
+  end
+  local used = usage.used or usage.tokens or usage.inputTokens
+  local total = usage.total or usage.limit or usage.max
+  if used and total then
+    return "ctx " .. tostring(used) .. "/" .. tostring(total)
+  end
+  if used then
+    return "ctx " .. tostring(used)
+  end
+  return nil
+end
+
+local function assistant_meta(thread, block)
+  local meta = {}
+  local request = thread.pending_request
+  local model = request and request.spec and request.spec.model or thread.config.model
+  local reasoning = request and request.spec and request.spec.reasoning_effort or thread.config.reasoning_effort
+  local model_name = model_label(model)
+  if model_name then
+    table.insert(meta, model_name)
+  end
+  if reasoning and reasoning ~= "" then
+    table.insert(meta, "effort " .. tostring(reasoning))
+  end
+  if block and block.state and block.state ~= "" and block.state ~= "done" then
+    table.insert(meta, tostring(block.state))
+  end
+  return meta
+end
+
+local function header_hl(kind)
+  if kind == "user" then
+    return "AlmaHeaderUser"
+  end
+  if kind == "assistant" then
+    return "AlmaHeaderAssistant"
+  end
+  return "AlmaHeaderSection"
+end
+
+local function mark_header(thread, line, kind, title, meta, block)
+  table.insert(thread.header_marks, {
+    line = line,
+    kind = kind,
+    title = title,
+    meta = meta or {},
+    block = block,
+  })
+end
+
+local function header_virt_text(mark)
+  local title = " " .. tostring(mark.title or "") .. " "
+  local chunks = { { title, header_hl(mark.kind) } }
+  if mark.meta and #mark.meta > 0 then
+    table.insert(chunks, { " " .. table.concat(mark.meta, " · ") .. " ", "AlmaHeaderMeta" })
+  end
+  local used = vim.fn.strdisplaywidth(table.concat(vim.tbl_map(function(chunk)
+    return chunk[1]
+  end, chunks), ""))
+  local sep = config.get().render.separator or "───"
+  local remaining = math.max(3, vim.o.columns - used - 1)
+  table.insert(chunks, { string.rep(sep, math.max(1, math.ceil(remaining / #sep))), "AlmaHeaderSeparator" })
+  return chunks
+end
+
+local function apply_header_marks(thread, bufnr)
+  for _, mark in ipairs(thread.header_marks or {}) do
+    vim.api.nvim_buf_set_extmark(bufnr, ns, mark.line - 1, 0, {
+      conceal = "",
+      virt_text = header_virt_text(mark),
+      virt_text_pos = "overlay",
+      priority = 2000,
+      strict = false,
+    })
+    if mark.block then
+      thread.render_index[mark.line] = mark.block
+    end
+  end
+end
+
+local function render_tool(thread, lines, block)
+  local title = "Tool: " .. tostring(block.tool or "unknown")
+  if block.state then
+    title = title .. " [" .. tostring(block.state) .. "]"
+  end
+  local line = add(lines, "### " .. title)
+  mark_header(thread, line, "section", title, {}, block)
   if block.tool_call_id then
     add(lines, "tool_call_id: " .. tostring(block.tool_call_id))
   end
@@ -92,29 +201,49 @@ local function render_block(thread, lines, block, opts)
   opts = opts or {}
   local start = #lines + 1
   if block.type == "UserBlock" then
-    add(lines, "## You" .. (block.state and (" [" .. block.state .. "]") or ""))
+    local line = add(lines, "## You")
+    local meta = {}
+    if block.state and block.state ~= "" then
+      table.insert(meta, tostring(block.state))
+    end
+    local ctx = context_label(thread, block)
+    if ctx then
+      table.insert(meta, ctx)
+    end
+    mark_header(thread, line, "user", "You", meta, block)
     add_text(lines, block.text)
   elseif block.type == "AssistantBlock" then
     if not opts.assistant_body then
-      add(lines, "## Alma" .. (block.state and (" [" .. block.state .. "]") or ""))
+      local line = add(lines, "## Alma")
+      mark_header(thread, line, "assistant", "Alma", assistant_meta(thread, block), block)
+      add(lines, "")
     end
     add_text(lines, block.text)
   elseif block.type == "ReasoningBlock" then
-    add(lines, "### Reasoning" .. (block.state and (" [" .. block.state .. "]") or ""))
+    local title = "Reasoning" .. (block.state and (" [" .. block.state .. "]") or "")
+    local line = add(lines, "### " .. title)
+    mark_header(thread, line, "section", title, {}, block)
     add_text(lines, events.block_text(block))
   elseif block.type == "ToolCallBlock" then
-    render_tool(lines, block)
+    render_tool(thread, lines, block)
   elseif block.type == "AgentTimelineBlock" then
-    add(lines, "### Agent Timeline: " .. tostring(block.title or "event"))
+    local title = "Agent Timeline: " .. tostring(block.title or "event")
+    local line = add(lines, "### " .. title)
+    mark_header(thread, line, "section", title, {}, block)
     add_text(lines, events.block_text(block))
   elseif block.type == "RawEventBlock" then
-    add(lines, "### Raw Event: " .. tostring(block.title or "unknown"))
+    local title = "Raw Event: " .. tostring(block.title or "unknown")
+    local line = add(lines, "### " .. title)
+    mark_header(thread, line, "section", title, {}, block)
     add_text(lines, vim.inspect(block.raw or block))
   elseif block.type == "ErrorBlock" then
-    add(lines, "### Error")
+    local line = add(lines, "### Error")
+    mark_header(thread, line, "section", "Error", {}, block)
     add_text(lines, events.block_text(block))
   else
-    add(lines, "### " .. tostring(block.type or "Block"))
+    local title = tostring(block.type or "Block")
+    local line = add(lines, "### " .. title)
+    mark_header(thread, line, "section", title, {}, block)
     add_text(lines, events.block_text(block))
   end
 
@@ -138,11 +267,8 @@ end
 local function render_assistant_group(thread, lines, blocks, index)
   local group_id = assistant_group_id(blocks[index])
   local first_block = blocks[index]
-  local start = #lines + 1
-  add(lines, "## Alma")
-  for lnum = start, #lines do
-    thread.render_index[lnum] = first_block
-  end
+  local line = add(lines, "## Alma")
+  mark_header(thread, line, "assistant", "Alma", assistant_meta(thread, first_block), first_block)
   add(lines, "")
 
   while index <= #blocks and assistant_group_id(blocks[index]) == group_id do
@@ -173,12 +299,16 @@ local function header(thread)
     "sync: " .. tostring(thread.sync),
   }
   if thread.status_message then
-    table.insert(parts, "status: " .. thread.status_message)
+    table.insert(parts, "status: " .. tostring(thread.status_message))
   end
   if thread.last_error then
     table.insert(parts, "last_error: " .. tostring(thread.last_error))
   end
   return parts
+end
+
+local function buffer_locked(thread)
+  return thread.pending_request ~= nil or thread.generation ~= "idle" or #(thread.queue or {}) > 0
 end
 
 function _G.AlmaFoldExpr(lnum)
@@ -215,10 +345,14 @@ function M.render(thread)
     return
   end
 
+  setup_highlights()
+
   local bufnr = thread.bufnr
-  local prompt = thread.prompt_lines or existing_prompt(thread)
+  local locked = buffer_locked(thread)
+  local prompt = locked and { "" } or (thread.prompt_lines or existing_prompt(thread))
   thread.prompt_lines = nil
   thread.render_index = {}
+  thread.header_marks = {}
   thread.folds = {}
 
   local lines = {}
@@ -238,24 +372,30 @@ function M.render(thread)
     end
   end
 
-  add(lines, config.get().render.prompt_marker)
-  local prompt_start = #lines
-  for _, line in ipairs(#prompt > 0 and prompt or { "" }) do
-    add(lines, line)
+  if not locked then
+    local line = add(lines, config.get().render.prompt_marker)
+    mark_header(thread, line, "user", "You", {}, nil)
+    local prompt_start = #lines
+    for _, prompt_line in ipairs(#prompt > 0 and prompt or { "" }) do
+      add(lines, prompt_line)
+    end
+    thread.prompt_start = prompt_start
+  else
+    thread.prompt_start = nil
   end
-  thread.prompt_start = prompt_start
 
   vim.bo[bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
-  vim.bo[bufnr].modifiable = true
+  apply_header_marks(thread, bufnr)
+  vim.bo[bufnr].modifiable = not locked
 
   local virt = {
-    { "model: " .. tostring(thread.config.model or "default"), "Comment" },
+    { "model: " .. tostring(model_label(thread.config.model) or "default"), "Comment" },
     { " / reasoning: " .. tostring(thread.config.reasoning_effort or "default"), "Comment" },
   }
   if thread.context_usage then
-    table.insert(virt, { " / context: " .. tostring(thread.context_usage.used or thread.context_usage.tokens or "?"), "Comment" })
+    table.insert(virt, { " / " .. tostring(context_label(thread) or "context"), "Comment" })
   end
   vim.api.nvim_buf_set_extmark(bufnr, ns, 0, 0, {
     virt_text = virt,
@@ -268,6 +408,7 @@ function M.render(thread)
       vim.wo[win].foldexpr = "v:lua.AlmaFoldExpr(v:lnum)"
       vim.wo[win].foldlevel = 0
       vim.wo[win].wrap = true
+      vim.wo[win].conceallevel = math.max(vim.wo[win].conceallevel, 1)
     end
   end
 end

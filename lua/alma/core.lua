@@ -18,49 +18,80 @@ local function is_busy(thread)
   return thread.backend_generating or busy_states[thread.generation] == true
 end
 
-local function queued_block(request)
+local function request_user_block(request)
   return {
     type = "UserBlock",
     text = request.spec.prompt,
-    state = "queued",
     local_only = true,
+    context_count = #(request.spec.ephemeral_context or {}),
   }
+end
+
+local function queued_block(request)
+  local block = request_user_block(request)
+  block.state = "queued"
+  return block
 end
 
 local function queued_assistant_block()
   return {
     type = "AssistantBlock",
-    text = "Queued: Alma is already generating for this thread. alma.nvim will send this request after the current generation reconciles.",
+    text = "⏳ Queued. Alma will send this after the current response finishes.",
     state = "queued",
     local_only = true,
   }
 end
 
-local function active_blocks(request)
-  return {
-    {
-      type = "UserBlock",
-      text = request.spec.prompt,
-      state = "submitted",
-      local_only = true,
-    },
-    {
-      type = "AssistantBlock",
-      text = "Submitted. Waiting for Alma backend event...",
-      state = "waiting_backend",
-      local_only = true,
-    },
-  }
+local function message_text(message)
+  local msg = message and (message.message or message) or {}
+  if msg.role ~= "user" then
+    return ""
+  end
+  local parts = msg.parts or {}
+  local text_parts = {}
+  for _, part in ipairs(parts) do
+    if part.type == "text" and type(part.text) == "string" and part.text ~= "" then
+      table.insert(text_parts, part.text)
+    end
+  end
+  return util.trim(table.concat(text_parts, "\n"))
+end
+
+local function has_persisted_user_prompt(thread, request)
+  local prompt = util.trim(request.spec.prompt)
+  if prompt == "" then
+    return false
+  end
+  for _, message in ipairs(thread.messages or {}) do
+    local metadata = message.metadata or {}
+    if util.trim(metadata.original_text or metadata.originalText or "") == prompt then
+      return true
+    end
+    if message_text(message) == prompt then
+      return true
+    end
+  end
+  return false
+end
+
+local function active_blocks(thread, request)
+  local blocks = {}
+  if not has_persisted_user_prompt(thread, request) then
+    table.insert(blocks, request_user_block(request))
+  end
+  table.insert(blocks, {
+    type = "AssistantBlock",
+    text = thread.streaming_text ~= nil and thread.streaming_text or "⏳ Alma is thinking...",
+    state = thread.streaming_text and "streaming" or "loading",
+    local_only = true,
+  })
+  return blocks
 end
 
 local function rebuild_local_blocks(thread)
   local blocks = {}
   if thread.pending_request and thread.generation ~= "idle" then
-    util.list_extend(blocks, active_blocks(thread.pending_request))
-    if thread.streaming_text and thread.streaming_text ~= "" then
-      blocks[#blocks].text = thread.streaming_text
-      blocks[#blocks].state = "streaming"
-    end
+    util.list_extend(blocks, active_blocks(thread, thread.pending_request))
   end
   for _, request in ipairs(thread.queue or {}) do
     table.insert(blocks, queued_block(request))
@@ -90,7 +121,7 @@ local function start_request(thread, request, effects)
   thread.sync = "dirty"
   thread.pending_request = request
   thread.streaming_text = nil
-  thread.status_message = "Submitted. Waiting for Alma backend event..."
+  thread.status_message = "Alma is thinking..."
   thread.last_error = nil
   thread.prompt_lines = { "" }
   rebuild_local_blocks(thread)
@@ -179,7 +210,7 @@ function M.reduce_thread(thread, event)
   elseif event.type == "ack_timeout" then
     if thread.pending_request and (thread.generation == "submitted" or thread.generation == "waiting_backend") then
       thread.generation = "waiting_backend"
-      thread.status_message = "Sent, waiting for backend event. Polling REST fallback..."
+      thread.status_message = "Alma is still thinking. Polling REST fallback..."
       table.insert(effects, { type = "rest_fetch_messages", thread_id = thread.id })
       table.insert(effects, {
         type = "start_timer",
@@ -286,6 +317,9 @@ function M.reduce_thread(thread, event)
       thread.generation = "streaming"
       local delta = event.data.delta or event.data.text or event.data.content
       if type(delta) == "string" and delta ~= "" and thread.pending_request then
+        if thread.streaming_text == nil or thread.streaming_text == "⏳ Alma is thinking..." then
+          thread.streaming_text = ""
+        end
         thread.streaming_text = (thread.streaming_text or "") .. delta
         rebuild_local_blocks(thread)
       end

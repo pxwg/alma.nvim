@@ -221,7 +221,36 @@ assert(positions["## You"] < positions["## Alma"], "user renders before assistan
 assert(positions["## Alma"] < positions["### Agent Timeline: step-start"], "assistant heading wraps timeline")
 assert(positions["### Agent Timeline: step-start"] < positions["### Reasoning [done]"], "timeline renders before reasoning")
 assert(positions["### Reasoning [done]"] < positions["answer second"], "reasoning renders before assistant text")
+assert_eq(rendered_lines[#rendered_lines - 1], "## You", "idle prompt uses user header")
+assert_eq(vim.bo[bufnr].modifiable, true, "idle chat buffer is editable")
 thread.last_error = nil
+
+thread.pending_request = { spec = spec, payload = payload, created_at = 2 }
+thread.generation = "submitted"
+thread.streaming_text = nil
+thread.blocks = {}
+thread.local_blocks = {
+  { type = "UserBlock", text = "Test", local_only = true },
+  { type = "AssistantBlock", text = "⏳ Alma is thinking...", state = "loading", local_only = true },
+}
+require("alma.ui.render").render(thread)
+local locked_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+local you_count = 0
+local old_heading_count = 0
+for _, line in ipairs(locked_lines) do
+  if line == "## You" then
+    you_count = you_count + 1
+  end
+  if line:match("^## You %[") or line:match("^## Alma %[") then
+    old_heading_count = old_heading_count + 1
+  end
+end
+assert_eq(you_count, 1, "locked render has one user block and no prompt")
+assert_eq(old_heading_count, 0, "locked render hides submitted/waiting backend headings")
+assert_eq(vim.bo[bufnr].modifiable, false, "generating chat buffer is locked")
+thread.pending_request = nil
+thread.generation = "idle"
+thread.local_blocks = {}
 
 print("alma.nvim validation OK")
 vim.cmd("qa")
