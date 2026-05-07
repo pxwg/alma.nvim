@@ -83,7 +83,7 @@ function M.ensure_thread(thread_id, opts)
   vim.bo[bufnr].swapfile = false
   vim.bo[bufnr].filetype = "alma"
   vim.bo[bufnr].modifiable = true
-  vim.bo[bufnr].undolevels = 1000
+  vim.bo[bufnr].undolevels = -1
   state.bind_buffer(thread, bufnr)
   setup_buffer_autocmds(bufnr, thread_id)
   require("alma.ui.render").render(thread)

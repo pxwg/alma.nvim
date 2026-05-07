@@ -8,6 +8,7 @@ local M = {}
 
 local ns = vim.api.nvim_create_namespace("alma.nvim")
 local follow_threshold = 5
+local pending_render_timers = {}
 
 local foldable_types = {
   ReasoningBlock = true,
@@ -866,23 +867,57 @@ local function prune_view_states(thread, bufnr)
   end
 end
 
+local function build_fold_levels(thread)
+  local levels = {}
+  for _, fold in ipairs(thread.folds or {}) do
+    levels[fold.start] = ">1"
+    for lnum = fold.start + 1, fold.finish - 1 do
+      levels[lnum] = "1"
+    end
+    levels[fold.finish] = "<1"
+  end
+  thread.fold_levels = levels
+end
+
+local function suspend_window_folds(bufnr)
+  local snapshots = {}
+  for _, win in ipairs(vim.fn.win_findbuf(bufnr)) do
+    if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == bufnr then
+      snapshots[win] = {
+        foldmethod = vim.wo[win].foldmethod,
+        foldenable = vim.wo[win].foldenable,
+      }
+      vim.wo[win].foldmethod = "manual"
+      vim.wo[win].foldenable = false
+    end
+  end
+  return snapshots
+end
+
+local function restore_suspended_folds(snapshots)
+  for win, snapshot in pairs(snapshots or {}) do
+    if vim.api.nvim_win_is_valid(win) then
+      vim.wo[win].foldmethod = snapshot.foldmethod
+      vim.wo[win].foldenable = snapshot.foldenable
+    end
+  end
+end
+
+local function replace_buffer_lines(bufnr, lines)
+  local fold_snapshots = suspend_window_folds(bufnr)
+  local ok, err = pcall(vim.api.nvim_buf_set_lines, bufnr, 0, -1, false, lines)
+  restore_suspended_folds(fold_snapshots)
+  if not ok then
+    error(err)
+  end
+end
+
 function _G.AlmaFoldExpr(lnum)
   local thread = require("alma.state").thread_for_buf(0)
   if not thread then
     return "0"
   end
-  for _, fold in ipairs(thread.folds or {}) do
-    if lnum == fold.start then
-      return ">1"
-    end
-    if lnum > fold.start and lnum < fold.finish then
-      return "1"
-    end
-    if lnum == fold.finish then
-      return "<1"
-    end
-  end
-  return "0"
+  return (thread.fold_levels and thread.fold_levels[lnum]) or "0"
 end
 
 function M.select_render_tree(thread)
@@ -912,6 +947,7 @@ function M.render(thread)
   thread.stream_decoration_marks = {}
   thread.composer_token_marks = {}
   thread.folds = {}
+  thread.fold_levels = {}
 
   local lines = {}
   for _, line in ipairs(header(thread)) do
@@ -937,9 +973,10 @@ function M.render(thread)
     add(lines, prompt_line)
   end
   thread.prompt_start = prompt_start
+  build_fold_levels(thread)
 
   vim.bo[bufnr].modifiable = true
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  replace_buffer_lines(bufnr, lines)
   vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
   apply_header_marks(thread, bufnr)
   apply_reasoning_marks(thread, bufnr)
@@ -962,6 +999,20 @@ function M.render(thread)
 
   apply_window_views(thread, bufnr, snapshots)
   prune_view_states(thread, bufnr)
+end
+
+function M.schedule(thread, delay)
+  if not thread or not thread.id then
+    return
+  end
+  local key = tostring(thread.id)
+  if pending_render_timers[key] then
+    return
+  end
+  pending_render_timers[key] = vim.defer_fn(function()
+    pending_render_timers[key] = nil
+    M.render(thread)
+  end, delay or config.get().render_debounce_ms)
 end
 
 return M

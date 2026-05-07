@@ -144,7 +144,7 @@ function M.run(effects)
     elseif effect.type == "stop_timer" then
       stop_timer(effect.thread_id, effect.name)
     elseif effect.type == "render" then
-      require("alma.ui.render").render(get_thread(effect.thread_id))
+      require("alma.ui.render").schedule(get_thread(effect.thread_id))
     elseif effect.type == "append_event_log" then
       state.append_event(effect.thread_id, effect.event)
     elseif effect.type == "notify" then

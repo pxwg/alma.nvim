@@ -7,6 +7,7 @@ local defaults = {
   ack_timeout_ms = 2000,
   poll_interval_ms = 1500,
   refetch_debounce_ms = 250,
+  render_debounce_ms = 80,
   completion_ttl_ms = 30000,
   long_output_lines = 80,
   long_output_bytes = 12000,

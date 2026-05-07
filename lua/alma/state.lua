@@ -40,6 +40,7 @@ local function default_thread(id, opts)
     event_log = {},
     render_index = {},
     folds = {},
+    fold_levels = {},
     view_state = {},
     context_usage = nil,
     pending_request = nil,
