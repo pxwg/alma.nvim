@@ -21,6 +21,9 @@ With a plugin manager, add this repository and call:
 ```lua
 require("alma").setup({
   api_url = vim.env.ALMA_API_URL or "http://127.0.0.1:23001",
+  model = nil,
+  reasoning_effort = nil,
+  window_layout = "float",
 })
 ```
 
@@ -33,10 +36,14 @@ luarocks make alma.nvim-scm-1.rockspec
 ## Commands
 
 - `:AlmaHealth` checks Neovim, `curl`, and the Alma API.
-- `:Alma open`, `:Alma toggle`, `:Alma float`, and `:Alma sidebar` open or hide
-  the current Alma thread in the default floating layout or a right sidebar.
-  Pass an optional thread id, for example `:Alma sidebar <thread_id>`.
-- `:AlmaThreadOpen <thread_id>` opens a thread buffer and fetches messages.
+- `:Alma new [title]` creates a new thread in the current workspace.
+- `:Alma pick` and `:AlmaThreads` pick a thread from the current workspace.
+- `:AlmaThreadsGlobal` keeps the old global thread picker behavior explicit.
+- `:Alma open <thread_id>`, `:Alma toggle <thread_id>`, `:Alma float <thread_id>`,
+  and `:Alma sidebar <thread_id>` open or hide a specific Alma thread using the
+  configured window layout behavior.
+- `:AlmaThreadOpen <thread_id>` opens a thread with the configured Alma layout
+  and fetches messages.
 - `:AlmaSubmit [prompt]` submits prompt text. Without arguments it submits the
   editable bottom `## You` composer in an Alma buffer.
 - `:AlmaStop` sends `stop_generation` over WebSocket.
@@ -69,6 +76,26 @@ Static completions work offline for `/`, `@`, `$`, and `>`. Dynamic models,
 tools, skills, and MCP servers are fetched opportunistically from Alma API
 catalog endpoints and cached with a TTL.
 
+## Defaults
+
+`model` and `reasoning_effort` default to `nil`, so each thread/request uses
+Alma's backend default unless the user configures a default or selects one in the
+thread composer. `window_layout` defaults to `"float"`; set it to `"sidebar"` to
+open threads in the side panel by default.
+
+## Workspace Resolution
+
+By default alma.nvim resolves the current workspace as `git root -> cwd -> current
+file directory`. Override it with:
+
+```lua
+require("alma").setup({
+  resolve_workspace = function(ctx)
+    return { id = nil, name = "project", path = ctx.git_root or ctx.cwd or ctx.file_dir }
+  end,
+})
+```
+
 ## Request Tokens
 
 Token-only lines configure a request and are removed from the final prompt:
@@ -82,6 +109,33 @@ Token-only lines configure a request and are removed from the final prompt:
 
 Unknown token-only lines are kept in the prompt and surfaced as warnings.
 
+Markdown images like `![alt](./image.png)`, `![alt](/abs/image.png)`,
+`![alt](file:///abs/image.png)`, `![alt](https://...)`, and data URI images are
+sent as Alma file parts while the original markdown stays visible locally.
+
+## Tool Output Rendering
+
+Tool output rendering uses a registry instead of one hard-coded JSON dump.
+Built-in renderers format `Bash`, `Read`, `Edit`, `Write`, `Grep`, and `Glob`
+with tool-specific code blocks, including standard ```diff blocks for editable
+patches. Unknown tools fall back to raw Lua-style output.
+
+```lua
+require("alma").setup({
+  render = {
+    tool_outputs = {
+      mode = "smart", -- or "raw"
+      fallback = "raw",
+      renderers = {
+        MyTool = function(block)
+          return { "custom:", "```text", vim.inspect(block.output), "```" }
+        end,
+      },
+    },
+  },
+})
+```
+
 ## Reliability Contract
 
 Submitting a request turns the bottom `## You` composer into the sent user
@@ -93,6 +147,11 @@ Completion or error events force REST reconciliation through
 
 If no related WebSocket event arrives before the ack timeout, the buffer shows
 that the request was sent and starts REST polling fallback.
+
+During streaming, the bottom `## You` composer is only anchored when it is
+already visible; if the user is reading elsewhere, alma.nvim preserves that view
+and does not steal the scroll position. A lightweight TUI loading bar is rendered
+near the active response while generation is in progress.
 
 ## Verify
 
@@ -106,8 +165,9 @@ Run a manual API check:
 
 ```vim
 :AlmaHealth
-:Alma open
-:Alma float <thread_id>
+:Alma new
+:Alma pick
+:Alma open <thread_id>
 :Alma sidebar <thread_id>
 :AlmaThreadOpen <thread_id>
 ```

@@ -15,9 +15,11 @@ local events = require("alma.events")
 local state = require("alma.state")
 local ws = require("alma.ws")
 local config = require("alma.config")
+local rest = require("alma.rest")
 local render = require("alma.ui.render")
 local request_metadata = require("alma.ui.metadata")
 local tokens = require("alma.ui.tokens")
+local tool_renderers = require("alma.ui.tool_renderers")
 
 local function thread_visible_windows(test_thread)
   local wins = {}
@@ -237,6 +239,27 @@ config.setup({ notify = false, api_url = "http://localhost:23001/" })
 assert_eq(config.api_url(), "http://localhost:23001", "setup api url override")
 assert_eq(config.ws_url(), "ws://localhost:23001/ws/threads", "setup ws url override")
 config.setup({ notify = false })
+assert_eq(config.get().model, nil, "default model is empty")
+assert_eq(config.get().reasoning_effort, nil, "default reasoning effort is empty")
+assert_eq(config.get().window_layout, "float", "default window layout is float")
+config.setup({ notify = false, model = "gpt-test-default", reasoning_effort = "xhigh", window_layout = "sidebar" })
+local configured_thread = state.get_thread("validate-config-default-thread", { cwd = root })
+assert_eq(configured_thread.config.model, "gpt-test-default", "thread inherits configured default model")
+assert_eq(configured_thread.config.reasoning_effort, "xhigh", "thread inherits configured default reasoning")
+assert_eq(config.get().window_layout, "sidebar", "window layout can be configured")
+config.setup({ notify = false })
+local resolved_workspace = config.resolve_workspace(0)
+assert(resolved_workspace.path and resolved_workspace.path ~= "", "workspace resolver returns a path")
+config.setup({
+  notify = false,
+  resolve_workspace = function(ctx)
+    return { id = "workspace-id", name = "workspace-name", path = ctx.cwd }
+  end,
+})
+local custom_workspace = config.resolve_workspace(0)
+assert_eq(custom_workspace.id, "workspace-id", "custom workspace resolver id")
+assert_eq(custom_workspace.name, "workspace-name", "custom workspace resolver name")
+config.setup({ notify = false })
 
 local slash_new = tokens.classify("/new")
 assert(has_label(tokens.static_for_trigger("/"), "/new"), "token static slash includes /new")
@@ -287,6 +310,7 @@ assert_eq(spec.reasoning_effort, "xhigh", "parser reasoning")
 assert_eq(spec.metadata.reasoningEffort, "xhigh", "parser reasoning metadata")
 assert_eq(spec.tools[1], "Bash", "parser tool")
 assert_eq(spec.ephemeral_context[1].type, "diagnostics", "parser context")
+assert_eq(spec.metadata.source, "alma_nvim", "parser metadata source is API-safe")
 
 local payload = parser.compile_request(thread, spec)
 local current_request_metadata = request_metadata.from_request({ spec = spec, payload = payload })
@@ -354,9 +378,78 @@ assert_eq(payload.data.threadId, "validate-thread", "compiled payload thread")
 assert_eq(payload.data.userMessage.role, "user", "compiled user message role")
 assert_eq(payload.data.userMessage.parts[1].type, "text", "compiled user message part type")
 assert_eq(payload.data.userMessage.parts[1].text, "hello alma", "compiled user message text")
+local image_path = root .. "/.alma-validate-image.png"
+vim.fn.writefile({ "fakepng" }, image_path, "b")
+local image_spec = parser.parse_input({ "look at this", "![chart](.alma-validate-image.png)" }, thread)
+assert_eq(image_spec.prompt, "look at this", "parser strips markdown image from prompt")
+assert_eq(image_spec.display_prompt, "look at this\n![chart](.alma-validate-image.png)", "parser preserves image markdown for display")
+assert_eq(image_spec.images[1].type, "file", "parser image becomes file part")
+assert_eq(image_spec.images[1].mediaType, "image/png", "parser image media type")
+assert_eq(image_spec.images[1].filename, "chart", "parser image alt filename")
+local image_payload = parser.compile_request(thread, image_spec)
+assert_eq(image_payload.data.userMessage.parts[1].type, "text", "image payload keeps text part")
+assert_eq(image_payload.data.userMessage.parts[2].type, "file", "image payload appends file part")
+vim.fn.delete(image_path)
 assert_eq(payload.data.model, "test-model", "compiled request model")
 assert_eq(payload.data.ephemeralModel, "test-model", "compiled ephemeral model")
 assert_eq(payload.data.userMessageMetadata.model, "test-model", "compiled model metadata")
+assert_eq(payload.data.source, "alma_nvim", "compiled payload source is API-safe")
+
+local read_render = table.concat(tool_renderers.render({
+  tool = "Read",
+  input = { file_path = root .. "/scripts/validate.lua", offset = 1, limit = 3 },
+  output = { content = "local root = vim.fn.getcwd()\nprint(root)" },
+}), "\n")
+assert(read_render:find("```lua", 1, true), "Read renderer uses filetype code block")
+assert(read_render:find("local root", 1, true), "Read renderer includes content")
+local edit_render = table.concat(tool_renderers.render({
+  tool = "Edit",
+  input = {
+    file_path = "scripts/validate.lua",
+    old_string = "old line\n",
+    new_string = "new line\n",
+  },
+  output = { changed = true, replacements = 1, start_line = 12, file_path = "scripts/validate.lua" },
+}), "\n")
+assert(edit_render:find("```diff", 1, true), "Edit renderer uses diff code block")
+assert(edit_render:find("--- a/scripts/validate.lua", 1, true), "Edit renderer includes diff old path")
+assert(edit_render:find("-old line", 1, true), "Edit renderer includes removed line")
+assert(edit_render:find("+new line", 1, true), "Edit renderer includes added line")
+config.setup({
+  notify = false,
+  render = {
+    tool_outputs = {
+      renderers = {
+        CustomTool = function(block)
+          return { "custom output: " .. tostring(block.output.value) }
+        end,
+      },
+    },
+  },
+})
+local custom_render = table.concat(tool_renderers.render({ tool = "CustomTool", output = { value = "ok" } }), "\n")
+assert_eq(custom_render, "custom output: ok", "custom tool renderer override")
+config.setup({ notify = false })
+
+local captured_create_body
+local original_post = rest.post
+rest.post = function(path, body, callback)
+  if path == "/api/threads" then
+    captured_create_body = body
+    callback({ id = "validate-created-thread", title = body.title, model = body.model, reasoningEffort = body.reasoningEffort }, nil)
+    return
+  end
+  return original_post(path, body, callback)
+end
+rest.create_thread({
+  title = "Created",
+  workspace_id = "workspace-id",
+  model = "provider:gpt-default",
+  reasoning_effort = "xhigh",
+}, function() end)
+rest.post = original_post
+assert_eq(captured_create_body.model, "provider:gpt-default", "thread create sends default model")
+assert_eq(captured_create_body.reasoningEffort, "xhigh", "thread create sends default reasoning effort")
 
 local auto_thread = state.get_thread("validate-auto-thread", { cwd = root })
 auto_thread.config.tools = "__auto__"
@@ -464,13 +557,18 @@ local chronological_blocks = events.normalize_messages({
   },
 })
 assert_eq(chronological_blocks[1].type, "UserBlock", "chronological user block")
-assert_eq(chronological_blocks[2].type, "AgentTimelineBlock", "chronological timeline block")
-assert_eq(chronological_blocks[2].title, "step-start", "timeline fallback title")
-assert_eq(chronological_blocks[2].request_model, "test-model", "timeline inherits request model")
-assert_eq(chronological_blocks[3].type, "ReasoningBlock", "chronological reasoning block")
-assert_eq(chronological_blocks[3].request_reasoning_effort, "xhigh", "reasoning inherits request effort")
-assert_eq(chronological_blocks[4].type, "AssistantBlock", "chronological assistant block")
-assert_eq(chronological_blocks[4].request_model, "test-model", "assistant inherits request model")
+assert_eq(chronological_blocks[2].type, "ReasoningBlock", "chronological reasoning block")
+assert_eq(chronological_blocks[2].request_reasoning_effort, "xhigh", "reasoning inherits request effort")
+assert_eq(chronological_blocks[3].type, "AssistantBlock", "chronological assistant block")
+assert_eq(chronological_blocks[3].request_model, "test-model", "assistant inherits request model")
+local visible_timeline_blocks = events.normalize_messages({
+  {
+    id = "validate-thread--assistant-visible-step",
+    role = "assistant",
+    parts = { { type = "step-start", text = "visible milestone" } },
+  },
+})
+assert_eq(visible_timeline_blocks[1].type, "AgentTimelineBlock", "non-empty step-start remains visible")
 
 local deepseek_blocks = events.normalize_messages({
   {
@@ -824,14 +922,28 @@ thread.last_error = "curl: timed out\n"
 render.render(thread)
 assert(vim.api.nvim_buf_line_count(bufnr) > 5, "render produced lines")
 local rendered_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+assert(rendered_lines[1]:match("^# Alma:"), "render keeps only the top Alma title")
+assert(rendered_lines[2] == "", "render title is followed by a blank line")
+local hidden_header_prefixes = {
+  "thread:",
+  "cwd:",
+  "transport:",
+  "generation:",
+  "sync:",
+  "status:",
+  "last_error:",
+}
 local positions = {}
 for index, line in ipairs(rendered_lines) do
   positions[line] = positions[line] or index
   assert(not line:find("\n", 1, true), "render line must not contain newline")
+  for _, prefix in ipairs(hidden_header_prefixes) do
+    assert(not vim.startswith(line, prefix), "render hides header metadata prefix " .. prefix)
+  end
 end
 assert(positions["## You"] < positions["## Alma"], "user renders before assistant group")
-assert(positions["## Alma"] < positions["### Agent Timeline: step-start"], "assistant heading wraps timeline")
-assert(positions["### Agent Timeline: step-start"] < positions["### Reasoning [done]"], "timeline renders before reasoning")
+assert(not positions["### Agent Timeline: step-start"], "empty step-start timeline is hidden")
+assert(positions["## Alma"] < positions["### Reasoning [done]"], "assistant heading wraps reasoning")
 assert(positions["### Reasoning [done]"] < positions["answer second"], "reasoning renders before assistant text")
 assert_eq(rendered_lines[#rendered_lines - 1], "## You", "idle prompt uses user header")
 local render_ns = vim.api.nvim_get_namespaces()["alma.nvim"]
@@ -1195,9 +1307,13 @@ assert_near_bottom(sticky_win, bufnr, "sticky resumes after returning bottom")
 
 local legacy_thread = require("alma").open_thread("validate-legacy-thread")
 local legacy_win = vim.api.nvim_get_current_win()
-assert_eq(vim.api.nvim_win_get_buf(legacy_win), legacy_thread.bufnr, "legacy open_thread focuses thread buffer")
-assert_eq(vim.api.nvim_win_get_config(legacy_win).relative, "", "legacy open_thread uses normal window")
-assert_bottom_composer(legacy_thread, legacy_win, "legacy open_thread")
+assert_eq(vim.api.nvim_win_get_buf(legacy_win), legacy_thread.bufnr, "open_thread focuses thread buffer")
+assert_eq(vim.api.nvim_win_get_config(legacy_win).relative, "editor", "open_thread uses configured window layout")
+assert_eq(vim.bo[legacy_thread.bufnr].filetype, "markdown", "Alma thread buffer uses markdown filetype")
+assert(vim.bo[legacy_thread.bufnr].undolevels ~= -1, "Alma thread buffer does not persistently disable undo")
+assert_eq(vim.wo[legacy_win].number, false, "Alma thread window hides absolute numbers")
+assert_eq(vim.wo[legacy_win].relativenumber, false, "Alma thread window hides relative numbers")
+assert_bottom_composer(legacy_thread, legacy_win, "open_thread")
 
 vim.cmd("Alma float validate-layout-thread")
 local layout_thread = state.get_thread("validate-layout-thread")
@@ -1275,6 +1391,28 @@ local multi_history_after = save_view(history_win)
 assert_eq(multi_history_after.lnum, multi_history_view.lnum, "multi-window history cursor preserved")
 assert_eq(multi_history_after.topline, multi_history_view.topline, "multi-window history viewport preserved")
 pcall(vim.api.nvim_win_close, history_win, true)
+
+pcall(vim.cmd, "only!")
+vim.cmd("enew!")
+local scoped_source_win = vim.api.nvim_get_current_win()
+vim.wo[scoped_source_win].number = true
+vim.wo[scoped_source_win].relativenumber = true
+vim.wo[scoped_source_win].signcolumn = "yes"
+local global_undolevels = vim.go.undolevels
+vim.cmd("Alma sidebar validate-scoped-options-thread")
+local scoped_thread = state.get_thread("validate-scoped-options-thread")
+local scoped_win = vim.api.nvim_get_current_win()
+assert_eq(vim.bo[scoped_thread.bufnr].filetype, "markdown", "scoped Alma buffer uses markdown filetype")
+assert(vim.bo[scoped_thread.bufnr].undolevels ~= -1, "scoped Alma buffer restores local undolevels after render")
+assert_eq(vim.go.undolevels, global_undolevels, "scoped Alma render preserves global undolevels")
+assert_eq(vim.wo[scoped_win].number, false, "scoped Alma window hides absolute numbers")
+assert_eq(vim.wo[scoped_win].relativenumber, false, "scoped Alma window hides relative numbers")
+assert_eq(vim.wo[scoped_win].signcolumn, "no", "scoped Alma window hides signcolumn")
+vim.cmd("enew!")
+assert_eq(vim.wo[scoped_win].number, true, "leaving Alma restores absolute numbers")
+assert_eq(vim.wo[scoped_win].relativenumber, true, "leaving Alma restores relative numbers")
+assert_eq(vim.wo[scoped_win].signcolumn, "yes", "leaving Alma restores signcolumn")
+assert_eq(vim.go.undolevels, global_undolevels, "leaving Alma preserves global undolevels")
 
 print("alma.nvim validation OK")
 vim.cmd("qa")
