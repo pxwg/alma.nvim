@@ -115,9 +115,10 @@ sent as Alma file parts while the original markdown stays visible locally.
 
 ## Tool Output Rendering
 
-Alma buffers use the dedicated `alma` filetype while registering markdown syntax,
-markdown Tree-sitter parsing, and a `markdown_inline` parser service for editor
-features. They persist only chat text plus one-line placeholders for reasoning, tool calls, raw events, and agent timeline
+Alma buffers use the dedicated `alma` filetype while registering markdown and
+`markdown_inline` Tree-sitter services. If Tree-sitter is unavailable, they fall
+back to legacy markdown syntax; otherwise they avoid stacking both highlighters.
+They persist only chat text plus one-line placeholders for reasoning, tool calls, raw events, and agent timeline
 events. Placeholder bodies are rendered with extmark virtual lines when expanded
 via `za` or `:AlmaToggleBlock`, so large tool payloads no longer inflate the
 markdown-like buffer. Use `:AlmaToolDetails` for the full, untruncated payload.
