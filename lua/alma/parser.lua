@@ -36,6 +36,19 @@ local function dedup_request_selection(value)
   return {}
 end
 
+local function payload_tool_selection(value)
+  if type(value) == "table" then
+    return value
+  end
+  if value == "__auto__" or value == "auto" then
+    return nil
+  end
+  if type(value) == "string" and value ~= "" then
+    return { value }
+  end
+  return {}
+end
+
 local function has_request_selection(value)
   if type(value) == "table" then
     return #value > 0
@@ -235,7 +248,7 @@ function M.compile_request(thread, spec)
       },
       model = effective_model,
       reasoningEffort = effective_reasoning,
-      tools = spec.tools,
+      tools = payload_tool_selection(spec.tools),
       enabledMCPServerIds = spec.mcp_servers,
       source = "alma.nvim",
       noTools = spec.no_tools,

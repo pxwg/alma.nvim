@@ -104,7 +104,7 @@ local auto_spec = parser.parse_input({ "hello auto" }, auto_thread)
 assert_eq(auto_spec.tools, "__auto__", "parser preserves auto tools sentinel")
 assert_eq(auto_spec.skills, "__auto_skill__", "parser preserves auto skills sentinel")
 local auto_payload = parser.compile_request(auto_thread, auto_spec)
-assert_eq(auto_payload.data.tools, "__auto__", "compiled payload preserves auto tools sentinel")
+assert_eq(auto_payload.data.tools, nil, "compiled payload omits auto tools sentinel")
 assert_eq(auto_payload.data.skillIds, "__auto_skill__", "compiled payload preserves auto skills sentinel")
 local explicit_spec = parser.parse_input({ "@Bash", "/skill:test-skill", "hello explicit" }, auto_thread)
 assert_eq(explicit_spec.tools[1], "Bash", "explicit tool overrides auto tools sentinel")
@@ -141,6 +141,12 @@ assert_eq(subagent_delta.known, true, "subagent event known")
 assert_eq(events.is_thread_scoped_event("subagent_message_delta"), true, "subagent event is thread scoped")
 assert_eq(events.is_global_ws_event("subagent_message_delta"), false, "subagent event is not global")
 assert_eq(events.is_global_ws_event("unknown_ws_event"), false, "unknown event is not global")
+local context_compaction_started = events.normalize_ws_event({
+  type = "context_compaction_started",
+  data = { threadId = "validate-thread", messageCount = 41 },
+})
+assert_eq(context_compaction_started.thread_id, "validate-thread", "context compaction event thread id")
+assert_eq(context_compaction_started.known, true, "context compaction event known")
 local subagent_delta_only = events.normalize_ws_event({
   type = "subagent_message_delta",
   data = {
