@@ -108,6 +108,29 @@ local message_added = events.normalize_ws_event({
   data = { id = "validate-thread--message-1" },
 })
 assert_eq(message_added.thread_id, "validate-thread", "message event composite id")
+local subagent_delta = events.normalize_ws_event({
+  type = "subagent_message_delta",
+  data = {
+    context = { threadId = "validate-thread" },
+    deltas = {
+      { threadId = "validate-thread", type = "text_append" },
+    },
+  },
+})
+assert_eq(subagent_delta.thread_id, "validate-thread", "subagent event context thread id")
+assert_eq(subagent_delta.known, true, "subagent event known")
+assert_eq(events.is_thread_scoped_event("subagent_message_delta"), true, "subagent event is thread scoped")
+assert_eq(events.is_global_ws_event("subagent_message_delta"), false, "subagent event is not global")
+assert_eq(events.is_global_ws_event("unknown_ws_event"), false, "unknown event is not global")
+local subagent_delta_only = events.normalize_ws_event({
+  type = "subagent_message_delta",
+  data = {
+    deltas = {
+      { threadId = "validate-thread", type = "text_append" },
+    },
+  },
+})
+assert_eq(subagent_delta_only.thread_id, "validate-thread", "subagent event delta thread id")
 
 local blocks = events.normalize_messages({
   {

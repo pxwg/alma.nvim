@@ -28,7 +28,10 @@ M.known_ws_events = {
   generation_completed = true,
   generation_error = true,
   stop_generation = true,
+  subagent_message_delta = true,
 }
+
+M.global_ws_events = {}
 
 local function data_of(raw)
   if type(raw) ~= "table" then
@@ -53,10 +56,15 @@ function M.is_thread_scoped_event(name)
   return M.known_ws_events[name] == true
 end
 
+function M.is_global_ws_event(name)
+  return M.global_ws_events[name] == true
+end
+
 function M.thread_id_from(raw)
   local data = data_of(raw)
   local message = data.message or raw.message or {}
   local thread = data.thread or raw.thread or {}
+  local context = data.context or raw.context or {}
   local name = raw.type or raw.event or raw.name
   local direct = data.threadId
     or data.thread_id
@@ -65,15 +73,34 @@ function M.thread_id_from(raw)
     or thread.threadId
     or message.threadId
     or message.thread_id
+    or context.threadId
+    or context.thread_id
     or raw.threadId
     or raw.thread_id
   if direct then
     return direct
   end
+  for _, delta in ipairs(data.deltas or raw.deltas or {}) do
+    local delta_thread_id = delta.threadId or delta.thread_id or delta.threadID
+    if delta_thread_id then
+      return delta_thread_id
+    end
+  end
   if type(name) == "string" and vim.startswith(name, "thread_") then
     return data.id or raw.id
   end
-  return composite_thread_id(data.id, data.parentId, data.parent_id, data.slotId, data.slot_id, raw.id, raw.parentId, raw.slotId)
+  return composite_thread_id(
+    data.id,
+    data.parentId,
+    data.parent_id,
+    data.slotId,
+    data.slot_id,
+    context.parentMessageId,
+    context.parent_message_id,
+    raw.id,
+    raw.parentId,
+    raw.slotId
+  )
 end
 
 function M.normalize_ws_event(raw)

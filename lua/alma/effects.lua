@@ -54,7 +54,7 @@ local function ensure_ws()
       local normalized = events.normalize_ws_event(raw)
       if normalized.thread_id then
         dispatch(normalized.thread_id, normalized)
-      elseif not events.is_thread_scoped_event(normalized.name) then
+      elseif events.is_global_ws_event(normalized.name) then
         for thread_id, _ in pairs(state.threads) do
           dispatch(thread_id, normalized)
         end
