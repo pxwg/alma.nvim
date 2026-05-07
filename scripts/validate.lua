@@ -66,7 +66,8 @@ local function assert_bottom_composer(thread, win, label)
   assert_eq(vim.api.nvim_win_get_buf(win), thread.bufnr, label .. " window shows thread buffer")
   assert(thread.prompt_start ~= nil, label .. " prompt start exists")
   local lines = vim.api.nvim_buf_get_lines(thread.bufnr, 0, -1, false)
-  assert_eq(lines[thread.prompt_start], config.get().render.prompt_marker, label .. " bottom composer marker")
+  assert_eq(lines[thread.prompt_start - 1], config.get().render.prompt_marker, label .. " bottom composer marker")
+  assert_eq(lines[thread.prompt_start], "", label .. " bottom composer breathing line")
   assert_cursor_in_composer(thread, win, label)
 end
 
@@ -280,6 +281,14 @@ local expected_api_url = (vim.env.ALMA_API_URL or "http://127.0.0.1:23001"):gsub
 assert_eq(config.api_url(), expected_api_url, "default or env api url")
 if not vim.env.ALMA_API_URL then
   assert_eq(config.ws_url(), "ws://127.0.0.1:23001/ws/threads", "default ws url")
+end
+if vim.treesitter and vim.treesitter.language and vim.treesitter.language.get_lang then
+  assert_eq(vim.treesitter.language.get_lang("alma"), "markdown", "Alma filetype maps to markdown parser")
+  assert_eq(
+    vim.treesitter.language.get_lang("alma.markdown_inline"),
+    "markdown_inline",
+    "Alma inline markdown service maps to markdown_inline parser"
+  )
 end
 config.setup({ notify = false, api_url = "http://localhost:23001/" })
 assert_eq(config.api_url(), "http://localhost:23001", "setup api url override")
@@ -994,7 +1003,8 @@ assert(#reasoning_lines == 1, "reasoning renders as one placeholder line")
 assert(positions["## Alma"] < reasoning_lines[1], "assistant heading wraps reasoning placeholder")
 assert(reasoning_lines[1] < positions["answer second"], "reasoning placeholder renders before assistant text")
 assert(not positions["thinking first"], "reasoning body is not persisted in the markdown buffer")
-assert_eq(rendered_lines[#rendered_lines - 1], "## You", "idle prompt uses user header")
+assert_eq(rendered_lines[thread.prompt_start - 1], "## You", "idle prompt uses user header")
+assert_eq(rendered_lines[thread.prompt_start], "", "idle prompt breathes after user header")
 local render_ns = vim.api.nvim_get_namespaces()["alma.nvim"]
 assert_header_contains(bufnr, render_ns, positions["## Alma"], "test-model", "historical assistant header model")
 assert_header_contains(bufnr, render_ns, positions["## Alma"], "effort xhigh", "historical assistant header reasoning")
@@ -1040,16 +1050,16 @@ render.render(header_thread)
 assert_header_contains(
   header_bufnr,
   render_ns,
-  header_thread.prompt_start,
+  header_thread.prompt_start - 1,
   "composer-thread-model",
   "composer header thread model"
 )
-assert_header_contains(header_bufnr, render_ns, header_thread.prompt_start, "effort medium", "composer header thread reasoning")
-assert_header_not_contains(header_bufnr, render_ns, header_thread.prompt_start, "ctx", "composer header no fabricated ctx")
+assert_header_contains(header_bufnr, render_ns, header_thread.prompt_start - 1, "effort medium", "composer header thread reasoning")
+assert_header_not_contains(header_bufnr, render_ns, header_thread.prompt_start - 1, "ctx", "composer header no fabricated ctx")
 assert_header_not_contains(
   header_bufnr,
   render_ns,
-  header_thread.prompt_start,
+  header_thread.prompt_start - 1,
   "remaining",
   "composer header no fabricated context remaining"
 )
@@ -1067,17 +1077,17 @@ render.render(header_thread)
 assert_header_contains(
   header_bufnr,
   render_ns,
-  header_thread.prompt_start,
+  header_thread.prompt_start - 1,
   "composer-request-model",
   "composer header pending request model"
 )
-assert_header_contains(header_bufnr, render_ns, header_thread.prompt_start, "effort xhigh", "composer header pending reasoning")
+assert_header_contains(header_bufnr, render_ns, header_thread.prompt_start - 1, "effort xhigh", "composer header pending reasoning")
 header_thread.context_usage = { remainingTokens = 321 }
 render.render(header_thread)
 assert_header_contains(
   header_bufnr,
   render_ns,
-  header_thread.prompt_start,
+  header_thread.prompt_start - 1,
   "ctx remaining 321",
   "composer header real context remaining"
 )
@@ -1220,7 +1230,7 @@ assert_no_token_mark(token_marks, "$unknown", "unknown selector token")
 assert_no_token_mark(token_marks, "$temp:not-a-number", "invalid selector token")
 assert_no_composer_marks_before(token_bufnr, render_ns, first_prompt_line, "historical text token highlighting")
 assert_eq(
-  vim.api.nvim_buf_get_lines(token_bufnr, token_thread.prompt_start - 1, token_thread.prompt_start, false)[1],
+  vim.api.nvim_buf_get_lines(token_bufnr, token_thread.prompt_start - 2, token_thread.prompt_start - 1, false)[1],
   "## You",
   "token highlight render keeps bottom composer marker"
 )
@@ -1252,7 +1262,8 @@ for index, line in ipairs(locked_lines) do
 end
 local composer_line = you_positions[#you_positions]
 assert_eq(#you_positions, 2, "submitted render keeps submitted user block and bottom composer")
-assert_eq(locked_lines[#locked_lines - 1], "## You", "submitted render keeps bottom composer")
+assert_eq(locked_lines[thread.prompt_start - 1], "## You", "submitted render keeps bottom composer")
+assert_eq(locked_lines[thread.prompt_start], "", "submitted render breathes after composer header")
 assert(not vim.tbl_contains(locked_lines, "⏳ Alma is thinking..."), "submitted render omits redundant loading assistant block")
 assert(not vim.tbl_contains(locked_lines, "## Alma"), "submitted render omits empty Alma section before streaming")
 assert(spinner_line_pos and spinner_line_pos < composer_line, "submitted render keeps spinner before composer")
@@ -1347,7 +1358,8 @@ local legacy_thread = require("alma").open_thread("validate-legacy-thread")
 local legacy_win = vim.api.nvim_get_current_win()
 assert_eq(vim.api.nvim_win_get_buf(legacy_win), legacy_thread.bufnr, "open_thread focuses thread buffer")
 assert_eq(vim.api.nvim_win_get_config(legacy_win).relative, "editor", "open_thread uses configured window layout")
-assert_eq(vim.bo[legacy_thread.bufnr].filetype, "markdown", "Alma thread buffer uses markdown filetype")
+assert_eq(vim.bo[legacy_thread.bufnr].filetype, "alma", "Alma thread buffer uses Alma filetype")
+assert_eq(vim.bo[legacy_thread.bufnr].syntax, "markdown", "Alma thread buffer uses markdown syntax")
 assert(vim.bo[legacy_thread.bufnr].undolevels ~= -1, "Alma thread buffer does not persistently disable undo")
 assert_eq(vim.wo[legacy_win].number, false, "Alma thread window hides absolute numbers")
 assert_eq(vim.wo[legacy_win].relativenumber, false, "Alma thread window hides relative numbers")
@@ -1440,7 +1452,8 @@ local global_undolevels = vim.go.undolevels
 vim.cmd("Alma sidebar validate-scoped-options-thread")
 local scoped_thread = state.get_thread("validate-scoped-options-thread")
 local scoped_win = vim.api.nvim_get_current_win()
-assert_eq(vim.bo[scoped_thread.bufnr].filetype, "markdown", "scoped Alma buffer uses markdown filetype")
+assert_eq(vim.bo[scoped_thread.bufnr].filetype, "alma", "scoped Alma buffer uses Alma filetype")
+assert_eq(vim.bo[scoped_thread.bufnr].syntax, "markdown", "scoped Alma buffer uses markdown syntax")
 assert(vim.bo[scoped_thread.bufnr].undolevels ~= -1, "scoped Alma buffer restores local undolevels after render")
 assert_eq(vim.go.undolevels, global_undolevels, "scoped Alma render preserves global undolevels")
 assert_eq(vim.wo[scoped_win].number, false, "scoped Alma window hides absolute numbers")

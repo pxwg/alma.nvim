@@ -748,6 +748,7 @@ render_block = function(thread, lines, block, opts)
   if block.type == "UserBlock" then
     local line = add(lines, "## You")
     mark_header(thread, line, "user", "You", user_meta(thread, block), block)
+    add(lines, "")
     add_text(lines, block.text)
   elseif block.type == "AssistantBlock" then
     if not opts.assistant_body then
@@ -1237,6 +1238,7 @@ function M.render(thread)
 
   local line = add(lines, config.get().render.prompt_marker)
   mark_header(thread, line, "user", "You", composer_meta(thread), nil)
+  add(lines, "")
   local prompt_start = #lines
   for _, prompt_line in ipairs(#prompt > 0 and prompt or { "" }) do
     add(lines, prompt_line)

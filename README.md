@@ -115,11 +115,12 @@ sent as Alma file parts while the original markdown stays visible locally.
 
 ## Tool Output Rendering
 
-Alma buffers persist only chat text plus one-line placeholders for reasoning,
-tool calls, raw events, and agent timeline events. Placeholder bodies are rendered
-with extmark virtual lines when expanded via `za` or `:AlmaToggleBlock`, so large
-tool payloads no longer inflate the markdown buffer. Use `:AlmaToolDetails` for
-the full, untruncated payload.
+Alma buffers use the dedicated `alma` filetype while registering markdown syntax,
+markdown Tree-sitter parsing, and a `markdown_inline` parser service for editor
+features. They persist only chat text plus one-line placeholders for reasoning, tool calls, raw events, and agent timeline
+events. Placeholder bodies are rendered with extmark virtual lines when expanded
+via `za` or `:AlmaToggleBlock`, so large tool payloads no longer inflate the
+markdown-like buffer. Use `:AlmaToolDetails` for the full, untruncated payload.
 
 Tool output rendering still uses a registry for expanded/detail views. Built-in
 renderers format `Bash`, `Read`, `Edit`, `Write`, `Grep`, and `Glob` with
@@ -150,9 +151,9 @@ require("alma").setup({
 ## Reliability Contract
 
 Submitting a request turns the bottom `## You` composer into the sent user
-message, renders a single loading Alma response, and locks the buffer until the
-response finishes or reconciles. If Alma is already generating for the same
-thread, the request is queued in Neovim and the buffer shows that queued state.
+message and shows progress with the lightweight spinner until the response
+streams or reconciles. If Alma is already generating for the same thread, the
+request is queued in Neovim and the buffer shows that queued state.
 Completion or error events force REST reconciliation through
 `GET /api/threads/<id>/messages`.
 

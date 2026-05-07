@@ -164,7 +164,9 @@ function M.ensure_thread(thread_id, opts)
   vim.bo[bufnr].swapfile = false
   vim.bo[bufnr].undofile = false
   state.bind_buffer(thread, bufnr)
-  vim.bo[bufnr].filetype = "markdown"
+  vim.bo[bufnr].filetype = "alma"
+  pcall(vim.treesitter.start, bufnr, "markdown")
+  vim.bo[bufnr].syntax = "markdown"
   vim.bo[bufnr].modifiable = true
   setup_buffer_autocmds(bufnr, thread_id)
   vim.keymap.set("n", "za", function()

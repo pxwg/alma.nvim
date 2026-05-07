@@ -7,11 +7,19 @@ local M = {}
 
 M._setup = false
 
+local function setup_filetype_services()
+  if vim.treesitter and vim.treesitter.language and vim.treesitter.language.register then
+    pcall(vim.treesitter.language.register, "markdown", "alma")
+    pcall(vim.treesitter.language.register, "markdown_inline", "alma.markdown_inline")
+  end
+end
+
 function M.setup(opts)
   if not util.version_at_least(0, 12, 0) then
     error("alma.nvim requires Neovim >= 0.12.0")
   end
   config.setup(opts or {})
+  setup_filetype_services()
   require("alma.commands").setup()
   require("alma.effects").start()
   M._setup = true
