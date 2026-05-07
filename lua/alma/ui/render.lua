@@ -328,10 +328,16 @@ local function render_block(thread, lines, block, opts)
 end
 
 local function assistant_group_id(block)
-  if not block or not block.message_id or not assistant_content_types[block.type] then
+  if not block or not assistant_content_types[block.type] then
     return nil
   end
-  return block.message_id
+  if block.message_id then
+    return block.message_id
+  end
+  if block.local_only then
+    return "__local_assistant__"
+  end
+  return nil
 end
 
 local function render_assistant_group(thread, lines, blocks, index)
@@ -375,10 +381,6 @@ local function header(thread)
     table.insert(parts, "last_error: " .. tostring(thread.last_error))
   end
   return parts
-end
-
-local function buffer_locked(thread)
-  return thread.pending_request ~= nil or thread.generation ~= "idle" or #(thread.queue or {}) > 0
 end
 
 local function ensure_view_state(thread)
@@ -646,9 +648,8 @@ function M.render(thread)
   setup_highlights()
 
   local bufnr = thread.bufnr
-  local locked = buffer_locked(thread)
   local snapshots = capture_window_views(thread, bufnr)
-  local prompt = locked and { "" } or (thread.prompt_lines or existing_prompt(thread))
+  local prompt = thread.prompt_lines or existing_prompt(thread)
   thread.prompt_lines = nil
   thread.render_index = {}
   thread.header_marks = {}
@@ -672,24 +673,20 @@ function M.render(thread)
     end
   end
 
-  if not locked then
-    local line = add(lines, config.get().render.prompt_marker)
-    mark_header(thread, line, "user", "You", {}, nil)
-    local prompt_start = #lines
-    for _, prompt_line in ipairs(#prompt > 0 and prompt or { "" }) do
-      add(lines, prompt_line)
-    end
-    thread.prompt_start = prompt_start
-  else
-    thread.prompt_start = nil
+  local line = add(lines, config.get().render.prompt_marker)
+  mark_header(thread, line, "user", "You", {}, nil)
+  local prompt_start = #lines
+  for _, prompt_line in ipairs(#prompt > 0 and prompt or { "" }) do
+    add(lines, prompt_line)
   end
+  thread.prompt_start = prompt_start
 
   vim.bo[bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
   apply_header_marks(thread, bufnr)
   apply_reasoning_marks(thread, bufnr)
-  vim.bo[bufnr].modifiable = not locked
+  vim.bo[bufnr].modifiable = true
 
   local virt = {
     { "model: " .. tostring(model_label(thread.config.model) or "default"), "Comment" },

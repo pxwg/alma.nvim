@@ -37,6 +37,12 @@ local function assert_near_bottom(win, bufnr, label)
   assert(line_count - (info.botline or cursor[1]) <= 5, label .. " viewport follows bottom")
 end
 
+local function assert_cursor_in_composer(thread, win, label)
+  local cursor = vim.api.nvim_win_get_cursor(win)
+  assert(thread.prompt_start ~= nil, label .. " prompt start exists")
+  assert(cursor[1] >= thread.prompt_start + 1, label .. " cursor stays in composer")
+end
+
 local function history_blocks(prefix, count)
   local blocks = {}
   for index = 1, count do
@@ -402,20 +408,65 @@ thread.local_blocks = {
 }
 render.render(thread)
 local locked_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-local you_count = 0
+local you_positions = {}
 local old_heading_count = 0
-for _, line in ipairs(locked_lines) do
+local loading_line
+local alma_line
+for index, line in ipairs(locked_lines) do
   if line == "## You" then
-    you_count = you_count + 1
+    table.insert(you_positions, index)
+  elseif line == "## Alma" then
+    alma_line = index
+  elseif line == "⏳ Alma is thinking..." then
+    loading_line = index
   end
   if line:match("^## You %[") or line:match("^## Alma %[") then
     old_heading_count = old_heading_count + 1
   end
 end
-assert_eq(you_count, 1, "locked render has one user block and no prompt")
-assert_eq(old_heading_count, 0, "locked render hides submitted/waiting backend headings")
-assert_eq(vim.bo[bufnr].modifiable, false, "generating chat buffer is locked")
-assert_near_bottom(sticky_win, bufnr, "sticky locked render")
+local composer_line = you_positions[#you_positions]
+assert_eq(#you_positions, 2, "submitted render keeps submitted user block and bottom composer")
+assert_eq(locked_lines[#locked_lines - 1], "## You", "submitted render keeps bottom composer")
+assert(alma_line and loading_line and alma_line < loading_line, "submitted assistant loading has Alma heading")
+assert(loading_line and composer_line and loading_line < composer_line, "submitted assistant loading renders before composer")
+assert_eq(old_heading_count, 0, "submitted render avoids legacy state headings")
+assert_eq(vim.bo[bufnr].modifiable, true, "generating chat buffer remains editable")
+assert_cursor_in_composer(thread, sticky_win, "sticky submitted render")
+assert_near_bottom(sticky_win, bufnr, "sticky submitted render")
+
+vim.api.nvim_buf_set_lines(bufnr, thread.prompt_start, -1, false, { "draft next request" })
+thread.generation = "streaming"
+thread.local_blocks = {
+  { type = "UserBlock", text = "Test", local_only = true },
+  { type = "ReasoningBlock", text = "thinking now", state = "streaming", local_only = true },
+  { type = "AssistantBlock", text = "partial answer", state = "streaming", local_only = true },
+}
+render.render(thread)
+local streaming_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+local reasoning_pos
+local answer_pos
+local streaming_alma_pos
+local streaming_composer_pos
+for index, line in ipairs(streaming_lines) do
+  if line == "## Alma" and not streaming_alma_pos then
+    streaming_alma_pos = index
+  elseif line == "### Reasoning [streaming]" then
+    reasoning_pos = index
+  elseif line == "partial answer" then
+    answer_pos = index
+  elseif line == "## You" then
+    streaming_composer_pos = index
+  end
+end
+assert(streaming_alma_pos and reasoning_pos and streaming_alma_pos < reasoning_pos, "streaming reasoning is inside Alma section")
+assert(reasoning_pos and answer_pos and reasoning_pos < answer_pos, "streaming reasoning renders before answer")
+assert(answer_pos and streaming_composer_pos and answer_pos < streaming_composer_pos, "streaming answer renders before composer")
+assert_eq(
+  vim.api.nvim_buf_get_lines(bufnr, thread.prompt_start, thread.prompt_start + 1, false)[1],
+  "draft next request",
+  "streaming render preserves composer draft"
+)
+assert_cursor_in_composer(thread, sticky_win, "sticky streaming render")
 thread.pending_request = nil
 thread.generation = "idle"
 thread.local_blocks = {}
