@@ -15,6 +15,16 @@ local busy_states = {
   cancelling = true,
 }
 
+local persisted_response_block_types = {
+  AssistantBlock = true,
+  ReasoningBlock = true,
+  ToolCallBlock = true,
+  ToolOutputBlock = true,
+  RawEventBlock = true,
+  AgentTimelineBlock = true,
+  ErrorBlock = true,
+}
+
 local function is_busy(thread)
   return thread.backend_generating or busy_states[thread.generation] == true
 end
@@ -111,27 +121,79 @@ local function stream_delta_chunks(data, event_name)
   return table.concat(chunks.text), table.concat(chunks.reasoning)
 end
 
+local function request_prompt(request)
+  return util.trim(request and request.spec and request.spec.prompt or "")
+end
+
+local function request_original_text(request)
+  return util.trim(request and request.spec and request.spec.metadata and request.spec.metadata.original_text or "")
+end
+
 local function has_persisted_user_prompt(thread, request)
-  local prompt = util.trim(request.spec.prompt)
-  if prompt == "" then
+  local prompt = request_prompt(request)
+  local original_text = request_original_text(request)
+  if prompt == "" and original_text == "" then
     return false
   end
   for _, message in ipairs(thread.messages or {}) do
     local metadata = message.metadata or {}
-    if util.trim(metadata.original_text or metadata.originalText or "") == prompt then
+    local persisted_original = util.trim(metadata.original_text or metadata.originalText or "")
+    if original_text ~= "" and persisted_original == original_text then
       return true
     end
-    if message_text(message) == prompt then
+    if prompt ~= "" and (persisted_original == prompt or message_text(message) == prompt) then
       return true
     end
   end
   return false
 end
 
+local function user_block_matches_request(block, request)
+  local prompt = request_prompt(request)
+  local original_text = request_original_text(request)
+  local metadata = block.metadata or {}
+  local persisted_original = util.trim(metadata.original_text or metadata.originalText or "")
+  if original_text ~= "" and persisted_original == original_text then
+    return true
+  end
+  return prompt ~= "" and (util.trim(block.text or "") == prompt or persisted_original == prompt)
+end
+
+local function block_has_persisted_response_content(block)
+  if not persisted_response_block_types[block.type] then
+    return false
+  end
+  if block.type ~= "AssistantBlock" then
+    return true
+  end
+  return events.block_text(block) ~= ""
+end
+
+local function has_persisted_response_for_request(thread, request)
+  local after_current_user = false
+  for _, block in ipairs(thread.blocks or {}) do
+    if block.type == "UserBlock" then
+      after_current_user = user_block_matches_request(block, request)
+    elseif after_current_user and block_has_persisted_response_content(block) then
+      return true
+    end
+  end
+  return false
+end
+
+local function clear_local_stream(thread)
+  thread.streaming_text = nil
+  thread.streaming_reasoning_text = nil
+end
+
 local function active_blocks(thread, request)
   local blocks = {}
+  local has_persisted_response = has_persisted_response_for_request(thread, request)
   if not has_persisted_user_prompt(thread, request) then
     table.insert(blocks, request_user_block(request))
+  end
+  if has_persisted_response then
+    return blocks
   end
   local has_stream = false
   if thread.streaming_reasoning_text and thread.streaming_reasoning_text ~= "" then
@@ -313,6 +375,9 @@ function M.reduce_thread(thread, event)
   elseif event.type == "rest_messages_loaded" then
     thread.messages = event.messages or {}
     thread.blocks = events.normalize_messages(thread.messages)
+    if thread.pending_request and has_persisted_response_for_request(thread, thread.pending_request) then
+      clear_local_stream(thread)
+    end
     thread.sync = "clean"
     thread.last_refetch_at = util.now_ms()
     local finalizing = thread.generation == "reconciling"
@@ -394,11 +459,15 @@ function M.reduce_thread(thread, event)
       thread.generation = "streaming"
       local text_delta, reasoning_delta = stream_delta_chunks(event.data, event.name)
       if thread.pending_request and (text_delta ~= "" or reasoning_delta ~= "") then
-        if reasoning_delta ~= "" then
-          thread.streaming_reasoning_text = (thread.streaming_reasoning_text or "") .. reasoning_delta
-        end
-        if text_delta ~= "" then
-          thread.streaming_text = (thread.streaming_text or "") .. text_delta
+        if has_persisted_response_for_request(thread, thread.pending_request) then
+          clear_local_stream(thread)
+        else
+          if reasoning_delta ~= "" then
+            thread.streaming_reasoning_text = (thread.streaming_reasoning_text or "") .. reasoning_delta
+          end
+          if text_delta ~= "" then
+            thread.streaming_text = (thread.streaming_text or "") .. text_delta
+          end
         end
         rebuild_local_blocks(thread)
       end

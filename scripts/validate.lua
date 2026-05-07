@@ -748,6 +748,63 @@ assert_eq(thread.local_blocks[2].text, "thinking", "streaming reasoning block ha
 assert_eq(thread.local_blocks[3].type, "AssistantBlock", "streaming answer remains assistant block")
 assert_eq(thread.local_blocks[3].text, "answer", "streaming answer block has answer text")
 assert_eq(reasoning_stream_effects[2].type, "render", "reasoning message_delta renders streaming update")
+
+local persisted_stream_user = {
+  id = "validate-thread--user-stream",
+  message = {
+    id = "user-stream",
+    role = "user",
+    parts = { { type = "text", text = spec.prompt } },
+  },
+  metadata = spec.metadata,
+}
+local persisted_stream_assistant = {
+  id = "validate-thread--assistant-stream",
+  parentId = "validate-thread--user-stream",
+  message = {
+    id = "assistant-stream",
+    role = "assistant",
+    parts = {
+      { type = "step-start" },
+      { type = "reasoning", text = "persisted thinking", state = "done" },
+      { type = "text", text = "persisted answer" },
+    },
+  },
+}
+thread.backend_generating = true
+thread.generation = "streaming"
+thread.pending_request = { spec = spec, payload = payload, created_at = 3 }
+thread.streaming_text = "local duplicate"
+thread.streaming_reasoning_text = nil
+thread.local_blocks = {}
+core.reduce_thread(thread, {
+  type = "rest_messages_loaded",
+  messages = { persisted_stream_user },
+})
+assert_eq(#thread.local_blocks, 1, "persisted user alone keeps local stream visible")
+assert_eq(thread.local_blocks[1].type, "AssistantBlock", "persisted user local stream uses assistant block")
+assert_eq(thread.local_blocks[1].text, "local duplicate", "persisted user keeps local stream text")
+thread.streaming_text = "local duplicate"
+thread.streaming_reasoning_text = "local thinking"
+core.reduce_thread(thread, {
+  type = "rest_messages_loaded",
+  messages = { persisted_stream_user, persisted_stream_assistant },
+})
+assert_eq(thread.streaming_text, nil, "persisted assistant clears local stream text")
+assert_eq(thread.streaming_reasoning_text, nil, "persisted assistant clears local reasoning stream")
+assert_eq(#thread.local_blocks, 0, "persisted assistant suppresses duplicate local blocks")
+core.reduce_thread(thread, {
+  type = "ws_event",
+  name = "message_delta",
+  known = true,
+  data = {
+    threadId = "validate-thread",
+    deltas = { { type = "text_append", partType = "text", text = "late local duplicate" } },
+  },
+})
+assert_eq(thread.streaming_text, nil, "persisted assistant suppresses late local deltas")
+assert_eq(#thread.local_blocks, 0, "late local delta does not recreate duplicate assistant block")
+thread.backend_generating = false
 thread.pending_request = nil
 thread.streaming_text = nil
 thread.streaming_reasoning_text = nil
