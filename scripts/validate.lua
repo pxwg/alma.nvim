@@ -835,7 +835,18 @@ local _, effects = core.reduce_thread(thread, {
 assert_eq(#thread.queue, 1, "busy submit queues")
 assert(#thread.local_blocks >= 2, "queued submit renders local blocks")
 assert_eq(thread.local_blocks[1].metadata.requestModel, "test-model", "queued user block stores request model metadata")
-assert_eq(thread.local_blocks[2].request_model, "test-model", "queued assistant block inherits request model")
+assert_eq(thread.local_blocks[2].type, "QueuedBlock", "queued submit uses placeholder block")
+assert_eq(thread.local_blocks[2].request_model, "test-model", "queued placeholder block inherits request model")
+local queue_bufnr = vim.api.nvim_create_buf(false, true)
+state.bind_buffer(thread, queue_bufnr)
+render.render(thread)
+local queue_render_ns = vim.api.nvim_get_namespaces()["alma.nvim"]
+local queued_placeholder_line = placeholder_lines_for_block(thread, thread.local_blocks[2])[1]
+local queued_placeholder = placeholder_overlay_text(queue_bufnr, queue_render_ns, queued_placeholder_line)
+assert(queued_placeholder:find("Queued Request %[queued%]"), "queued placeholder uses unified title")
+assert(queued_placeholder:find("waiting for current response", 1, true), "queued placeholder uses compact meta")
+assert(not queued_placeholder:find("⏳", 1, true), "queued placeholder omits hourglass emoji")
+assert(not vim.tbl_contains(vim.api.nvim_buf_get_lines(queue_bufnr, 0, -1, false), "This request will send after the current response finishes."), "queued message body is virtual only")
 assert(effects[1].type == "notify" or effects[2].type == "notify", "queued submit notifies")
 local has_rest_fetch_thread = false
 for _, effect in ipairs(effects) do

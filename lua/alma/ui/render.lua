@@ -19,6 +19,7 @@ local placeholder_types = {
   ToolOutputBlock = true,
   RawEventBlock = true,
   AgentTimelineBlock = true,
+  QueuedBlock = true,
 }
 
 local assistant_content_types = {
@@ -28,6 +29,7 @@ local assistant_content_types = {
   ToolOutputBlock = true,
   RawEventBlock = true,
   AgentTimelineBlock = true,
+  QueuedBlock = true,
   ErrorBlock = true,
 }
 
@@ -705,6 +707,9 @@ local function placeholder_meta(block)
     local summary = truncate_display(compact_text(events.block_text(block)), 88)
     return summary ~= "" and { summary } or {}
   end
+  if block.type == "QueuedBlock" then
+    return { "waiting for current response" }
+  end
   if block.type == "RawEventBlock" then
     return { "debug event" }
   end
@@ -720,6 +725,9 @@ local function placeholder_title(block)
   end
   if block.type == "AgentTimelineBlock" then
     return "Agent Timeline: " .. tostring(block.title or "event")
+  end
+  if block.type == "QueuedBlock" then
+    return "Queued Request" .. (block.state and (" [" .. block.state .. "]") or "")
   end
   if block.type == "RawEventBlock" then
     return "Raw Event: " .. tostring(block.title or "unknown")

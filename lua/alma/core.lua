@@ -51,8 +51,8 @@ end
 
 local function queued_assistant_block(request)
   return request_assistant_block(request, {
-    type = "AssistantBlock",
-    text = "⏳ Queued. Alma will send this after the current response finishes.",
+    type = "QueuedBlock",
+    text = "This request will send after the current response finishes.",
     state = "queued",
     local_only = true,
   })
