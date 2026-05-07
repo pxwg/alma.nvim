@@ -333,12 +333,26 @@ local function mark_spinner(thread, line)
   table.insert(thread.spinner_marks, line)
 end
 
+local function placeholder_hint_key(block)
+  if placeholder_types[block.type] then
+    return "placeholder"
+  end
+  return nil
+end
+
 local function mark_placeholder(thread, line, key, block, title, meta, body_lines, decoration)
   thread.placeholder_marks = thread.placeholder_marks or {}
   thread.placeholder_index = thread.placeholder_index or {}
+  thread.placeholder_hint_seen = thread.placeholder_hint_seen or {}
   local expanded = thread.expanded_blocks and thread.expanded_blocks[key]
   if expanded == nil then
     expanded = default_expanded()
+  end
+  local hint_key = placeholder_hint_key(block)
+  local show_hint = true
+  if hint_key then
+    show_hint = not thread.placeholder_hint_seen[hint_key]
+    thread.placeholder_hint_seen[hint_key] = true
   end
   local mark = {
     line = line,
@@ -349,6 +363,7 @@ local function mark_placeholder(thread, line, key, block, title, meta, body_line
     body_lines = body_lines or {},
     expanded = expanded,
     decoration = decoration,
+    show_hint = show_hint,
   }
   table.insert(thread.placeholder_marks, mark)
   thread.placeholder_index[line] = mark
@@ -426,7 +441,9 @@ local function placeholder_virt_text(mark)
       table.insert(chunks, { " · " .. tostring(item), "AlmaBlockPlaceholderMeta" })
     end
   end
-  table.insert(chunks, { mark.expanded and " · za collapse" or " · za expand", "AlmaBlockPlaceholderHint" })
+  if mark.show_hint ~= false then
+    table.insert(chunks, { mark.expanded and " · za collapse" or " · za expand", "AlmaBlockPlaceholderHint" })
+  end
   return chunks
 end
 
@@ -1205,6 +1222,7 @@ function M.render(thread)
   thread.render_index = {}
   thread.placeholder_index = {}
   thread.placeholder_marks = {}
+  thread.placeholder_hint_seen = {}
   thread.header_marks = {}
   thread.reasoning_marks = {}
   thread.stream_decoration_marks = {}

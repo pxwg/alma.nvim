@@ -1034,6 +1034,27 @@ render.toggle_under_cursor()
 assert_eq(vim.bo[bufnr].modifiable, true, "idle chat buffer is editable")
 thread.last_error = nil
 
+local hint_thread = state.get_thread("validate-placeholder-hint-thread", { cwd = root })
+local hint_bufnr = vim.api.nvim_create_buf(false, true)
+state.bind_buffer(hint_thread, hint_bufnr)
+local first_hint_reasoning = { type = "ReasoningBlock", message_id = "hint-1", text = "first hint body", state = "done" }
+local repeated_hint_reasoning = { type = "ReasoningBlock", message_id = "hint-2", text = "second hint body", state = "done" }
+hint_thread.blocks = { first_hint_reasoning, repeated_hint_reasoning }
+hint_thread.local_blocks = {}
+hint_thread.pending_request = nil
+hint_thread.generation = "idle"
+render.render(hint_thread)
+local first_hint_line = placeholder_lines_for_block(hint_thread, first_hint_reasoning)[1]
+local repeated_hint_line = placeholder_lines_for_block(hint_thread, repeated_hint_reasoning)[1]
+assert(
+  placeholder_overlay_text(hint_bufnr, render_ns, first_hint_line):find("za expand", 1, true),
+  "first placeholder exposes expansion hint"
+)
+assert(
+  not placeholder_overlay_text(hint_bufnr, render_ns, repeated_hint_line):find("za expand", 1, true),
+  "repeated placeholder omits expansion hint"
+)
+
 local header_thread = state.get_thread("validate-header-metadata-thread", {
   cwd = root,
   model = "composer-thread-model",
@@ -1107,6 +1128,12 @@ local tool_decoration_block = {
   state = "output-available",
   output = "tool output body",
 }
+local tool_output_decoration_block = {
+  type = "ToolOutputBlock",
+  message_id = "stream-primary",
+  tool = "Bash",
+  output = "second tool output body",
+}
 local timeline_decoration_block = {
   type = "AgentTimelineBlock",
   message_id = "stream-primary",
@@ -1134,6 +1161,7 @@ local subagent_event_block = {
 stream_thread.blocks = {
   primary_assistant_block,
   tool_decoration_block,
+  tool_output_decoration_block,
   timeline_decoration_block,
   raw_decoration_block,
   subagent_metadata_block,
@@ -1145,6 +1173,17 @@ stream_thread.generation = "idle"
 render.render(stream_thread)
 local stream_marks = stream_decoration_marks(stream_bufnr, render_ns)
 assert_stream_decoration(stream_thread, stream_marks, tool_decoration_block, "AlmaStreamTool", "tool block gutter")
+assert_stream_decoration(stream_thread, stream_marks, tool_output_decoration_block, "AlmaStreamTool", "tool output gutter")
+local tool_placeholder_line = placeholder_lines_for_block(stream_thread, tool_decoration_block)[1]
+local tool_output_placeholder_line = placeholder_lines_for_block(stream_thread, tool_output_decoration_block)[1]
+assert(
+  placeholder_overlay_text(stream_bufnr, render_ns, tool_placeholder_line):find("za expand", 1, true),
+  "first tool placeholder exposes expansion hint"
+)
+assert(
+  not placeholder_overlay_text(stream_bufnr, render_ns, tool_output_placeholder_line):find("za expand", 1, true),
+  "repeated tool placeholder omits expansion hint"
+)
 assert_stream_decoration(
   stream_thread,
   stream_marks,
