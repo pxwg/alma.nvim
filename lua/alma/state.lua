@@ -40,6 +40,8 @@ local function default_thread(id, opts)
     queue = {},
     event_log = {},
     render_index = {},
+    placeholder_index = {},
+    expanded_blocks = {},
     folds = {},
     fold_levels = {},
     view_state = {},

@@ -146,6 +146,41 @@ local function header_overlay_text(bufnr, namespace, line)
   return ""
 end
 
+local function placeholder_overlay_text(bufnr, namespace, line)
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, namespace, 0, -1, { details = true })) do
+    local details = mark[4] or {}
+    if mark[2] + 1 == line and details.virt_text_pos == "overlay" and details.virt_text then
+      local text = ""
+      local is_placeholder = false
+      for _, chunk in ipairs(details.virt_text) do
+        text = text .. (chunk[1] or "")
+        is_placeholder = is_placeholder or tostring(chunk[2] or ""):match("^AlmaBlockPlaceholder") ~= nil
+      end
+      if is_placeholder then
+        return text
+      end
+    end
+  end
+  return ""
+end
+
+local function placeholder_virt_lines_text(bufnr, namespace, line)
+  local out = {}
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, namespace, 0, -1, { details = true })) do
+    local details = mark[4] or {}
+    if mark[2] + 1 == line and details.virt_lines then
+      for _, virt_line in ipairs(details.virt_lines) do
+        local text = ""
+        for _, chunk in ipairs(virt_line) do
+          text = text .. (chunk[1] or "")
+        end
+        table.insert(out, text)
+      end
+    end
+  end
+  return out
+end
+
 local function assert_header_contains(bufnr, namespace, line, needle, label)
   local text = header_overlay_text(bufnr, namespace, line)
   if not text:find(needle, 1, true) then
@@ -164,6 +199,17 @@ local function lines_for_block(test_thread, block)
   local lines = {}
   for lnum, indexed_block in pairs(test_thread.render_index or {}) do
     if indexed_block == block then
+      table.insert(lines, lnum)
+    end
+  end
+  table.sort(lines)
+  return lines
+end
+
+local function placeholder_lines_for_block(test_thread, block)
+  local lines = {}
+  for lnum, mark in pairs(test_thread.placeholder_index or {}) do
+    if mark.block == block then
       table.insert(lines, lnum)
     end
   end
@@ -943,8 +989,11 @@ for index, line in ipairs(rendered_lines) do
 end
 assert(positions["## You"] < positions["## Alma"], "user renders before assistant group")
 assert(not positions["### Agent Timeline: step-start"], "empty step-start timeline is hidden")
-assert(positions["## Alma"] < positions["### Reasoning [done]"], "assistant heading wraps reasoning")
-assert(positions["### Reasoning [done]"] < positions["answer second"], "reasoning renders before assistant text")
+local reasoning_lines = placeholder_lines_for_block(thread, chronological_blocks[2])
+assert(#reasoning_lines == 1, "reasoning renders as one placeholder line")
+assert(positions["## Alma"] < reasoning_lines[1], "assistant heading wraps reasoning placeholder")
+assert(reasoning_lines[1] < positions["answer second"], "reasoning placeholder renders before assistant text")
+assert(not positions["thinking first"], "reasoning body is not persisted in the markdown buffer")
 assert_eq(rendered_lines[#rendered_lines - 1], "## You", "idle prompt uses user header")
 local render_ns = vim.api.nvim_get_namespaces()["alma.nvim"]
 assert_header_contains(bufnr, render_ns, positions["## Alma"], "test-model", "historical assistant header model")
@@ -961,23 +1010,17 @@ for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, render_ns, 0, -1, { d
   end
 end
 assert(overlay_width_ok, "header overlay covers current window width")
-local reasoning_line = positions["thinking first"]
-assert(reasoning_line, "reasoning body line rendered")
-local reasoning_text_ok = false
-local reasoning_border_ok = false
-for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, render_ns, 0, -1, { details = true })) do
-  local details = mark[4] or {}
-  if mark[2] + 1 == reasoning_line then
-    reasoning_text_ok = reasoning_text_ok or details.hl_group == "AlmaReasoningText"
-    if details.virt_text_pos == "inline" and details.virt_text then
-      for _, chunk in ipairs(details.virt_text) do
-        reasoning_border_ok = reasoning_border_ok or chunk[2] == "AlmaReasoningBorder"
-      end
-    end
-  end
-end
-assert(reasoning_text_ok, "reasoning body uses muted text highlight")
-assert(reasoning_border_ok, "reasoning body uses inline border marker")
+local reasoning_placeholder = placeholder_overlay_text(bufnr, render_ns, reasoning_lines[1])
+assert(reasoning_placeholder:find("Reasoning %[done%]"), "reasoning placeholder shows status")
+assert(reasoning_placeholder:find("za expand", 1, true), "reasoning placeholder exposes expansion hint")
+assert_eq(#placeholder_virt_lines_text(bufnr, render_ns, reasoning_lines[1]), 0, "collapsed reasoning has no virtual body")
+vim.api.nvim_win_set_cursor(0, { reasoning_lines[1], 0 })
+render.toggle_under_cursor()
+local expanded_reasoning = placeholder_virt_lines_text(bufnr, render_ns, reasoning_lines[1])
+assert(#expanded_reasoning > 0, "expanded reasoning uses virtual lines")
+assert(table.concat(expanded_reasoning, "\n"):find("thinking first", 1, true), "expanded reasoning shows body virtually")
+assert(not vim.tbl_contains(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "thinking first"), "expanded reasoning still does not persist body")
+render.toggle_under_cursor()
 assert_eq(vim.bo[bufnr].modifiable, true, "idle chat buffer is editable")
 thread.last_error = nil
 
@@ -1236,24 +1279,24 @@ thread.local_blocks = {
 }
 render.render(thread)
 local streaming_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-local reasoning_pos
+local reasoning_pos = placeholder_lines_for_block(thread, thread.local_blocks[2])[1]
 local answer_pos
 local streaming_alma_pos
 local streaming_composer_pos
 for index, line in ipairs(streaming_lines) do
   if line == "## Alma" and not streaming_alma_pos then
     streaming_alma_pos = index
-  elseif line == "### Reasoning [streaming]" then
-    reasoning_pos = index
   elseif line == "partial answer" then
     answer_pos = index
   elseif line == "## You" then
     streaming_composer_pos = index
   end
 end
-assert(streaming_alma_pos and reasoning_pos and streaming_alma_pos < reasoning_pos, "streaming reasoning is inside Alma section")
-assert(reasoning_pos and answer_pos and reasoning_pos < answer_pos, "streaming reasoning renders before answer")
+assert(streaming_alma_pos and reasoning_pos and streaming_alma_pos < reasoning_pos, "streaming reasoning placeholder is inside Alma section")
+assert(reasoning_pos and answer_pos and reasoning_pos < answer_pos, "streaming reasoning placeholder renders before answer")
 assert(answer_pos and streaming_composer_pos and answer_pos < streaming_composer_pos, "streaming answer renders before composer")
+assert(placeholder_overlay_text(bufnr, render_ns, reasoning_pos):find("Reasoning %[streaming%]"), "streaming reasoning placeholder shows status")
+assert(not vim.tbl_contains(streaming_lines, "thinking now"), "streaming reasoning body is virtual only")
 assert_header_contains(bufnr, render_ns, streaming_alma_pos, "test-model", "streaming assistant header model")
 assert_header_contains(bufnr, render_ns, streaming_alma_pos, "effort xhigh", "streaming assistant header reasoning")
 assert_eq(

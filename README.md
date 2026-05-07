@@ -51,8 +51,8 @@ luarocks make alma.nvim-scm-1.rockspec
   `snacks.picker` navigation.
 - `:AlmaModels`, `:AlmaTools`, `:AlmaSkills`, `:AlmaMCPServers` update
   thread-local request defaults.
-- `:AlmaToolDetails`, `:AlmaQuickfix`, `:AlmaBlockQuickfix`, `:AlmaDiff` inspect
-  tool output, file locations, and patch-like output.
+- `:AlmaToolDetails`, `:AlmaToggleBlock`, `:AlmaQuickfix`, `:AlmaBlockQuickfix`,
+  `:AlmaDiff` inspect, expand, or route tool output, file locations, and patch-like output.
 
 ## blink.cmp
 
@@ -115,14 +115,25 @@ sent as Alma file parts while the original markdown stays visible locally.
 
 ## Tool Output Rendering
 
-Tool output rendering uses a registry instead of one hard-coded JSON dump.
-Built-in renderers format `Bash`, `Read`, `Edit`, `Write`, `Grep`, and `Glob`
-with tool-specific code blocks, including standard ```diff blocks for editable
+Alma buffers persist only chat text plus one-line placeholders for reasoning,
+tool calls, raw events, and agent timeline events. Placeholder bodies are rendered
+with extmark virtual lines when expanded via `za` or `:AlmaToggleBlock`, so large
+tool payloads no longer inflate the markdown buffer. Use `:AlmaToolDetails` for
+the full, untruncated payload.
+
+Tool output rendering still uses a registry for expanded/detail views. Built-in
+renderers format `Bash`, `Read`, `Edit`, `Write`, `Grep`, and `Glob` with
+tool-specific code blocks, including standard ```diff blocks for editable
 patches. Unknown tools fall back to raw Lua-style output.
 
 ```lua
 require("alma").setup({
   render = {
+    virtual_blocks = {
+      default_expanded = false,
+      max_lines = 80,
+      max_width = 180,
+    },
     tool_outputs = {
       mode = "smart", -- or "raw"
       fallback = "raw",

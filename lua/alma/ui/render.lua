@@ -11,8 +11,12 @@ local ns = vim.api.nvim_create_namespace("alma.nvim")
 local follow_threshold = 5
 local pending_render_timers = {}
 
-local foldable_types = {
+local foldable_types = {}
+
+local placeholder_types = {
   ReasoningBlock = true,
+  ToolCallBlock = true,
+  ToolOutputBlock = true,
   RawEventBlock = true,
   AgentTimelineBlock = true,
 }
@@ -70,6 +74,10 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, "AlmaStreamTimeline", { default = true, link = "DiagnosticHint" })
   vim.api.nvim_set_hl(0, "AlmaStreamRaw", { default = true, link = "DiagnosticWarn" })
   vim.api.nvim_set_hl(0, "AlmaStreamSubAgent", { default = true, link = "DiagnosticOk" })
+  vim.api.nvim_set_hl(0, "AlmaBlockPlaceholder", { default = true, link = "Comment" })
+  vim.api.nvim_set_hl(0, "AlmaBlockPlaceholderTitle", { default = true, link = "Special" })
+  vim.api.nvim_set_hl(0, "AlmaBlockPlaceholderMeta", { default = true, link = "Comment" })
+  vim.api.nvim_set_hl(0, "AlmaBlockPlaceholderHint", { default = true, link = "DiagnosticHint" })
 end
 
 local function add(lines, value)
@@ -102,6 +110,36 @@ local function truncate_display(value, limit)
     return value
   end
   return value:sub(1, limit - 1) .. "…"
+end
+
+local function compact_text(value)
+  return tostring(value or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function line_count(value)
+  value = tostring(value or "")
+  if value == "" then
+    return 0
+  end
+  local _, count = value:gsub("\n", "")
+  return count + 1
+end
+
+local function virtual_block_config()
+  local render_config = config.get().render or {}
+  return render_config.virtual_blocks or {}
+end
+
+local function default_expanded()
+  return virtual_block_config().default_expanded == true
+end
+
+local function max_virtual_lines()
+  return tonumber(virtual_block_config().max_lines) or 80
+end
+
+local function max_virtual_width()
+  return tonumber(virtual_block_config().max_width) or 180
 end
 
 local function first_string(...)
@@ -295,6 +333,28 @@ local function mark_spinner(thread, line)
   table.insert(thread.spinner_marks, line)
 end
 
+local function mark_placeholder(thread, line, key, block, title, meta, body_lines, decoration)
+  thread.placeholder_marks = thread.placeholder_marks or {}
+  thread.placeholder_index = thread.placeholder_index or {}
+  local expanded = thread.expanded_blocks and thread.expanded_blocks[key]
+  if expanded == nil then
+    expanded = default_expanded()
+  end
+  local mark = {
+    line = line,
+    key = key,
+    block = block,
+    title = title,
+    meta = meta or {},
+    body_lines = body_lines or {},
+    expanded = expanded,
+    decoration = decoration,
+  }
+  table.insert(thread.placeholder_marks, mark)
+  thread.placeholder_index[line] = mark
+  thread.render_index[line] = block
+end
+
 local function chunks_width(chunks)
   local width = 0
   for _, chunk in ipairs(chunks or {}) do
@@ -352,6 +412,57 @@ local function apply_header_marks(thread, bufnr)
     if mark.block then
       thread.render_index[mark.line] = mark.block
     end
+  end
+end
+
+local function placeholder_virt_text(mark)
+  local icon = mark.expanded and "▾ " or "▸ "
+  local chunks = {
+    { icon, mark.decoration and mark.decoration.hl_group or "AlmaBlockPlaceholder" },
+    { tostring(mark.title or "Block"), "AlmaBlockPlaceholderTitle" },
+  }
+  for _, item in ipairs(mark.meta or {}) do
+    if item and item ~= "" then
+      table.insert(chunks, { " · " .. tostring(item), "AlmaBlockPlaceholderMeta" })
+    end
+  end
+  table.insert(chunks, { mark.expanded and " · za collapse" or " · za expand", "AlmaBlockPlaceholderHint" })
+  return chunks
+end
+
+local function virtual_body_lines(mark)
+  if not mark.expanded then
+    return nil
+  end
+  local limit = max_virtual_lines()
+  local width = max_virtual_width()
+  local lines = {}
+  for index, line in ipairs(mark.body_lines or {}) do
+    if index > limit then
+      table.insert(lines, { { "  … truncated, use :AlmaToolDetails for full content", "AlmaBlockPlaceholderHint" } })
+      break
+    end
+    table.insert(lines, {
+      { "  │ ", mark.decoration and mark.decoration.hl_group or "AlmaBlockPlaceholder" },
+      { truncate_display(line, width), "AlmaBlockPlaceholder" },
+    })
+  end
+  if #lines == 0 then
+    table.insert(lines, { { "  │ (empty)", "AlmaBlockPlaceholderMeta" } })
+  end
+  return lines
+end
+
+local function apply_placeholder_marks(thread, bufnr)
+  for _, mark in ipairs(thread.placeholder_marks or {}) do
+    vim.api.nvim_buf_set_extmark(bufnr, ns, mark.line - 1, 0, {
+      conceal = "",
+      virt_text = placeholder_virt_text(mark),
+      virt_text_pos = "overlay",
+      virt_lines = virtual_body_lines(mark),
+      priority = 1900,
+      strict = false,
+    })
   end
 end
 
@@ -519,66 +630,116 @@ local render_block
 local assistant_group_id
 
 local function tool_title(block)
-  local title = "Tool: " .. tostring(block.tool or "unknown")
+  local title = tostring(block.tool or "unknown")
   if block.state then
     title = title .. " [" .. tostring(block.state) .. "]"
-  end
-  local summary = truncate_display(tool_summary(block), 110)
-  if summary ~= "" then
-    title = title .. " — " .. summary
-  end
-  local out_summary = output_summary(block)
-  if out_summary then
-    title = title .. " (" .. out_summary .. ")"
   end
   return title
 end
 
-local function render_tool(thread, lines, block)
-  local title = tool_title(block)
-  local line = add(lines, "### " .. title)
-  mark_header(thread, line, "section", title, {}, block)
-  if block.tool_call_id then
-    add(lines, "tool_call_id: " .. tostring(block.tool_call_id))
-  end
-  for _, rendered_line in ipairs(tool_renderers.render(block)) do
-    add(lines, rendered_line)
-  end
+local function block_key(block, opts)
+  local parts = {
+    tostring(opts and opts.block_index or ""),
+    tostring(block.type or "Block"),
+    tostring(block.message_id or ""),
+    tostring(block.tool_call_id or ""),
+    tostring(block.tool or ""),
+    tostring(block.title or ""),
+    tostring(block.state or ""),
+  }
+  return table.concat(parts, ":")
 end
 
-local function render_tool_run(thread, lines, blocks, index, group_id)
-  local run = {}
-  local cursor = index
-  while cursor <= #blocks and assistant_group_id(blocks[cursor]) == group_id and blocks[cursor].type == "ToolCallBlock" do
-    table.insert(run, blocks[cursor])
-    cursor = cursor + 1
+local function placeholder_expanded(thread, key)
+  local expanded = thread.expanded_blocks and thread.expanded_blocks[key]
+  if expanded == nil then
+    return default_expanded()
   end
-  if #run <= 1 then
-    render_block(thread, lines, blocks[index], { assistant_body = true })
-    return index + 1
-  end
+  return expanded == true
+end
 
-  local titles = {}
-  for _, block in ipairs(run) do
-    table.insert(titles, truncate_display(tostring(block.tool or "unknown") .. ": " .. tool_summary(block), 48))
-  end
-  local group_title = "Tools ×" .. tostring(#run) .. ": " .. table.concat(titles, "  |  ")
-  local start = #lines + 1
-  local line = add(lines, "### " .. group_title)
-  mark_header(thread, line, "section", group_title, {}, run[1])
-  thread.render_index[line] = run[1]
-  add(lines, "Grouped consecutive tool calls. Open the fold for details, or use :AlmaToolDetails on a tool block.")
-  add(lines, "")
-  for _, block in ipairs(run) do
-    local block_start = #lines + 1
-    render_tool(thread, lines, block)
-    for lnum = block_start, #lines do
-      thread.render_index[lnum] = block
+local function placeholder_meta(block)
+  if block.type == "ReasoningBlock" then
+    local text = events.block_text(block)
+    if text == "" then
+      return { "empty" }
     end
-    add(lines, "")
+    if #text > 20000 then
+      return { string.format("%.1f KB", #text / 1024) }
+    end
+    return { tostring(line_count(text)) .. " lines" }
   end
-  table.insert(thread.folds, { start = start, finish = #lines })
-  return cursor
+  if block.type == "ToolCallBlock" or block.type == "ToolOutputBlock" then
+    local meta = {}
+    local summary = truncate_display(compact_text(tool_summary(block)), 88)
+    local status = output_summary(block)
+    if summary ~= "" then
+      table.insert(meta, summary)
+    end
+    if status then
+      table.insert(meta, status)
+    end
+    if block.tool_call_id then
+      table.insert(meta, "id " .. truncate_display(block.tool_call_id, 18))
+    end
+    return meta
+  end
+  if block.type == "AgentTimelineBlock" then
+    local summary = truncate_display(compact_text(events.block_text(block)), 88)
+    return summary ~= "" and { summary } or {}
+  end
+  if block.type == "RawEventBlock" then
+    return { "debug event" }
+  end
+  return {}
+end
+
+local function placeholder_title(block)
+  if block.type == "ReasoningBlock" then
+    return "Reasoning" .. (block.state and (" [" .. block.state .. "]") or "")
+  end
+  if block.type == "ToolCallBlock" or block.type == "ToolOutputBlock" then
+    return tool_title(block)
+  end
+  if block.type == "AgentTimelineBlock" then
+    return "Agent Timeline: " .. tostring(block.title or "event")
+  end
+  if block.type == "RawEventBlock" then
+    return "Raw Event: " .. tostring(block.title or "unknown")
+  end
+  return tostring(block.type or "Block")
+end
+
+local function placeholder_body_lines(block)
+  if block.type == "ReasoningBlock" then
+    return util.split_lines(events.block_text(block))
+  end
+  if block.type == "ToolCallBlock" or block.type == "ToolOutputBlock" then
+    local body = {}
+    if block.tool_call_id then
+      table.insert(body, "tool_call_id: " .. tostring(block.tool_call_id))
+    end
+    for _, rendered_line in ipairs(tool_renderers.render(block)) do
+      table.insert(body, rendered_line)
+    end
+    return body
+  end
+  if block.type == "RawEventBlock" then
+    return util.split_lines(vim.inspect(block.raw or block))
+  end
+  return util.split_lines(events.block_text(block))
+end
+
+local function render_placeholder(thread, lines, block, opts)
+  local key = block_key(block, opts)
+  local expanded = placeholder_expanded(thread, key)
+  local body_lines = expanded and placeholder_body_lines(block) or {}
+  local decoration = stream_decoration_for_block(block)
+  local line = add(lines, " ")
+  mark_placeholder(thread, line, key, block, placeholder_title(block), placeholder_meta(block), body_lines, decoration)
+  if decoration then
+    mark_stream_decoration(thread, line, line, decoration, block)
+  end
 end
 
 render_block = function(thread, lines, block, opts)
@@ -595,25 +756,8 @@ render_block = function(thread, lines, block, opts)
       add(lines, "")
     end
     add_text(lines, block.text)
-  elseif block.type == "ReasoningBlock" then
-    local title = "Reasoning" .. (block.state and (" [" .. block.state .. "]") or "")
-    local line = add(lines, "### " .. title)
-    mark_header(thread, line, "section", title, {}, block)
-    local body_start = #lines + 1
-    add_text(lines, events.block_text(block))
-    mark_reasoning_lines(thread, body_start, #lines)
-  elseif block.type == "ToolCallBlock" then
-    render_tool(thread, lines, block)
-  elseif block.type == "AgentTimelineBlock" then
-    local title = "Agent Timeline: " .. tostring(block.title or "event")
-    local line = add(lines, "### " .. title)
-    mark_header(thread, line, "section", title, {}, block)
-    add_text(lines, events.block_text(block))
-  elseif block.type == "RawEventBlock" then
-    local title = "Raw Event: " .. tostring(block.title or "unknown")
-    local line = add(lines, "### " .. title)
-    mark_header(thread, line, "section", title, {}, block)
-    add_text(lines, vim.inspect(block.raw or block))
+  elseif placeholder_types[block.type] then
+    render_placeholder(thread, lines, block, opts)
   elseif block.type == "ErrorBlock" then
     local line = add(lines, "### Error")
     mark_header(thread, line, "section", "Error", {}, block)
@@ -633,7 +777,7 @@ render_block = function(thread, lines, block, opts)
     table.insert(thread.folds, { start = start, finish = finish })
   end
   local stream_decoration = stream_decoration_for_block(block)
-  if stream_decoration then
+  if stream_decoration and not placeholder_types[block.type] then
     local decoration_start = finish > start and start + 1 or start
     mark_stream_decoration(thread, decoration_start, finish, stream_decoration, block)
   end
@@ -661,12 +805,8 @@ local function render_assistant_group(thread, lines, blocks, index)
   add(lines, "")
 
   while index <= #blocks and assistant_group_id(blocks[index]) == group_id do
-    if blocks[index].type == "ToolCallBlock" then
-      index = render_tool_run(thread, lines, blocks, index, group_id)
-    else
-      render_block(thread, lines, blocks[index], { assistant_body = true })
-      index = index + 1
-    end
+    render_block(thread, lines, blocks[index], { assistant_body = true, block_index = index })
+    index = index + 1
   end
   return index
 end
@@ -1062,6 +1202,8 @@ function M.render(thread)
   local prompt = thread.prompt_lines or existing_prompt(thread)
   thread.prompt_lines = nil
   thread.render_index = {}
+  thread.placeholder_index = {}
+  thread.placeholder_marks = {}
   thread.header_marks = {}
   thread.reasoning_marks = {}
   thread.stream_decoration_marks = {}
@@ -1082,7 +1224,7 @@ function M.render(thread)
     if assistant_group_id(blocks[index]) then
       index = render_assistant_group(thread, lines, blocks, index)
     else
-      render_block(thread, lines, blocks[index])
+      render_block(thread, lines, blocks[index], { block_index = index })
       index = index + 1
     end
   end
@@ -1106,6 +1248,7 @@ function M.render(thread)
   replace_buffer_lines(bufnr, lines)
   vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
   apply_header_marks(thread, bufnr)
+  apply_placeholder_marks(thread, bufnr)
   apply_reasoning_marks(thread, bufnr)
   apply_stream_decoration_marks(thread, bufnr)
   apply_spinner_marks(thread, bufnr)
@@ -1130,6 +1273,23 @@ function M.render(thread)
   if thread_busy(thread) then
     M.schedule(thread, 140)
   end
+end
+
+function M.toggle_under_cursor()
+  local thread = require("alma.state").thread_for_buf(0)
+  if not thread then
+    util.notify("Current buffer is not an Alma thread buffer", vim.log.levels.ERROR)
+    return
+  end
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local mark = thread.placeholder_index and thread.placeholder_index[lnum]
+  if not mark then
+    util.notify("No expandable Alma block under cursor", vim.log.levels.WARN)
+    return
+  end
+  thread.expanded_blocks = thread.expanded_blocks or {}
+  thread.expanded_blocks[mark.key] = not placeholder_expanded(thread, mark.key)
+  M.render(thread)
 end
 
 function M.schedule(thread, delay)

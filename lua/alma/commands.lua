@@ -130,6 +130,10 @@ function M.setup()
     require("alma.ui.detail").open_under_cursor()
   end, { desc = "Open detail buffer for Alma block under cursor" })
 
+  vim.api.nvim_create_user_command("AlmaToggleBlock", function()
+    require("alma.ui.render").toggle_under_cursor()
+  end, { desc = "Expand or collapse Alma placeholder block under cursor" })
+
   vim.api.nvim_create_user_command("AlmaQuickfix", function()
     require("alma.ui.detail").quickfix_thread()
   end, { desc = "Populate quickfix from current Alma thread" })

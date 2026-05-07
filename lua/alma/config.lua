@@ -34,6 +34,11 @@ local defaults = {
       fallback = "raw",
       renderers = {},
     },
+    virtual_blocks = {
+      default_expanded = false,
+      max_lines = 80,
+      max_width = 180,
+    },
   },
 }
 

@@ -167,6 +167,9 @@ function M.ensure_thread(thread_id, opts)
   vim.bo[bufnr].filetype = "markdown"
   vim.bo[bufnr].modifiable = true
   setup_buffer_autocmds(bufnr, thread_id)
+  vim.keymap.set("n", "za", function()
+    require("alma.ui.render").toggle_under_cursor()
+  end, { buffer = bufnr, silent = true, desc = "Toggle Alma placeholder block" })
   require("alma.ui.render").render(thread)
   return thread
 end
