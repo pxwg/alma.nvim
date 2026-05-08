@@ -278,6 +278,19 @@ local function pop_queue_if_ready(thread, effects)
   })
 end
 
+local function configured_reasoning_effort(thread, source)
+  local configured = config.get().reasoning_effort
+  local current = thread.config.reasoning_effort
+  local source_reasoning = source.reasoningEffort or source.reasoning_effort
+  if configured then
+    if not current or current == source_reasoning then
+      return configured
+    end
+    return current
+  end
+  return source_reasoning or current
+end
+
 local function apply_thread_metadata(thread, payload)
   local data = payload or {}
   local source = data.thread or data
@@ -295,7 +308,7 @@ local function apply_thread_metadata(thread, payload)
   end
   thread.config.workspace_id = thread.workspace_id
   thread.config.model = source.model or thread.config.model
-  thread.config.reasoning_effort = source.reasoningEffort or source.reasoning_effort or thread.config.reasoning_effort
+  thread.config.reasoning_effort = configured_reasoning_effort(thread, source)
   thread.config.tools = source.tools or thread.config.tools
   thread.config.skills = source.skillIds or source.skills or thread.config.skills
   local was_backend_generating = thread.backend_generating
