@@ -1,22 +1,45 @@
-# alma.nvim
+# `alma.nvim`
 
 Native Neovim frontend for Alma's local runtime. One Alma thread maps to one
 Neovim buffer; REST is used as the source of truth and WebSocket is used for
 fast updates and request submission.
 
+## Positioning
+
+`alma.nvim` is the Neovim adapter layer for [Alma](https://alma.now/), the AI
+coding and orchestration environment created by [yetone](https://github.com/yetone).
+It embeds Alma into Neovim with as little friction as possible: prompts, streamed
+answers, tool calls, thread navigation, model selection, and workspace context all
+live naturally inside the editor.
+
+The plugin keeps Alma's memory, provider orchestration, skills, tools, agents,
+and local runtime as the source of intelligence, while Neovim stays responsible
+for the fast editing loop: buffers, windows, selections, diagnostics, quickfix,
+completion, and keyboard-native navigation.
+
+`alma.nvim` is also deeply influenced by
+[CopilotChat.nvim](https://github.com/CopilotC-Nvim/CopilotChat.nvim). Its
+author is a loyal user and contributor of CopilotChat.nvim, and `alma.nvim` carries
+forward that same belief that AI conversations should feel editor-native instead
+of bolted on.
+
 ## Requirements
 
 - Neovim 0.12.0 or newer.
+- `snacks.picker` from `snacks.nvim` for thread, workspace, buffer, event,
+  model, tool, skill, and MCP navigation.
+- `blink.cmp` for Alma's completion source.
 - `curl` in `PATH`.
 - Alma API running locally. The default is `http://127.0.0.1:23001`; override
   with `ALMA_API_URL` or `require("alma").setup({ api_url = "..." })`.
-- LuaRocks for dependency management. This MVP has no external Lua runtime
+- LuaRocks for dependency management. This MVP has no LuaRocks-managed runtime
   dependency beyond Neovim's Lua environment, but the rockspec is the canonical
   dependency/install manifest.
 
 ## Install
 
-With a plugin manager, add this repository and call:
+With a plugin manager, install `snacks.nvim`, `blink.cmp`, and this repository,
+then call:
 
 ```lua
 require("alma").setup({
@@ -85,7 +108,7 @@ open threads in the side panel by default.
 
 ## Workspace Resolution
 
-By default alma.nvim resolves the current workspace as `git root -> cwd -> current
+By default `alma.nvim` resolves the current workspace as `git root -> cwd -> current
 file directory`. Override it with:
 
 ```lua
@@ -162,7 +185,7 @@ If no related WebSocket event arrives before the ack timeout, the buffer shows
 that the request was sent and starts REST polling fallback.
 
 During streaming, the bottom `## You` composer is only anchored when it is
-already visible; if the user is reading elsewhere, alma.nvim preserves that view
+already visible; if the user is reading elsewhere, `alma.nvim` preserves that view
 and does not steal the scroll position. A lightweight TUI loading bar is rendered
 near the active response while generation is in progress.
 
