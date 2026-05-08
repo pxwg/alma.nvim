@@ -1,4 +1,4 @@
-# `alma.nvim`
+# alma.nvim
 
 Native Neovim frontend for Alma's local runtime. One Alma thread maps to one
 Neovim buffer; REST is used as the source of truth and WebSocket is used for
@@ -16,6 +16,11 @@ The plugin keeps Alma's memory, provider orchestration, skills, tools, agents,
 and local runtime as the source of intelligence, while Neovim stays responsible
 for the fast editing loop: buffers, windows, selections, diagnostics, quickfix,
 completion, and keyboard-native navigation.
+
+With `alma.nvim`, you can skip the heavy Electron frontend when you are already
+working in your favorite terminal editor. It brings Alma into the place where
+you write, navigate, refactor, and review code every day, so AI assistance feels
+like part of the editing flow rather than another app to context-switch into.
 
 `alma.nvim` is also deeply influenced by
 [CopilotChat.nvim](https://github.com/CopilotC-Nvim/CopilotChat.nvim). Its
