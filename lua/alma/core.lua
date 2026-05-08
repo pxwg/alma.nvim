@@ -231,11 +231,6 @@ local function queue_request(thread, request, effects)
   thread.status_message = "Request queued: Alma is already generating for this thread."
   thread.prompt_lines = { "" }
   rebuild_local_blocks(thread)
-  table.insert(effects, {
-    type = "notify",
-    level = vim.log.levels.WARN,
-    message = "Alma request queued for thread " .. util.short_id(thread.id) .. "; it will run after the current generation completes.",
-  })
   if thread.backend_generating and not thread.pending_request and thread.generation == "idle" then
     table.insert(effects, { type = "rest_fetch_thread", thread_id = thread.id })
   end
