@@ -10,6 +10,7 @@ local M = {}
 local ns = vim.api.nvim_create_namespace("alma.nvim")
 local follow_threshold = 5
 local pending_render_timers = {}
+local pending_spinner_timers = {}
 
 local foldable_types = {}
 
@@ -450,8 +451,8 @@ local function mark_stream_decoration(thread, start_line, finish_line, decoratio
 end
 
 local function mark_spinner(thread, line)
-  thread.spinner_marks = thread.spinner_marks or {}
-  table.insert(thread.spinner_marks, line)
+  thread.spinner_mark = { line = line }
+  thread.spinner_marks = { line }
 end
 
 local function placeholder_hint_key(block)
@@ -663,19 +664,43 @@ local function apply_stream_decoration_marks(thread, bufnr)
   end
 end
 
-local function apply_spinner_marks(thread, bufnr)
-  for _, lnum in ipairs(thread.spinner_marks or {}) do
-    local line = vim.api.nvim_buf_get_lines(bufnr, lnum - 1, lnum, false)[1] or ""
-    if line ~= "" then
-      vim.api.nvim_buf_set_extmark(bufnr, ns, lnum - 1, 0, {
-        end_col = #line,
-        hl_group = "AlmaSpinner",
-        hl_mode = "combine",
-        priority = 1000,
-        strict = false,
-      })
-    end
+local spinner_virt_text
+
+local function apply_spinner_mark(thread, bufnr, mark)
+  if not mark or not mark.line then
+    return
   end
+  local lnum = mark.line
+  if lnum < 1 or lnum > vim.api.nvim_buf_line_count(bufnr) then
+    return
+  end
+  mark.virt_text = spinner_virt_text(thread)
+  local opts = {
+    conceal = "",
+    virt_text = mark.virt_text,
+    virt_text_pos = "overlay",
+    priority = 1800,
+    strict = false,
+  }
+  if mark.extmark_id then
+    opts.id = mark.extmark_id
+  end
+  local ok, id = pcall(vim.api.nvim_buf_set_extmark, bufnr, ns, lnum - 1, 0, opts)
+  if not ok and opts.id then
+    opts.id = nil
+    id = vim.api.nvim_buf_set_extmark(bufnr, ns, lnum - 1, 0, opts)
+  elseif not ok then
+    error(id)
+  end
+  mark.extmark_id = id
+end
+
+local function apply_spinner_marks(thread, bufnr)
+  local mark = thread.spinner_mark
+  if not mark then
+    return
+  end
+  apply_spinner_mark(thread, bufnr, mark)
 end
 
 local function composer_token_hl(classified)
@@ -1019,14 +1044,49 @@ local function thread_busy(thread)
   return thread and (thread.backend_generating or busy_generations[thread.generation] == true)
 end
 
-local function spinner_line(thread)
-  local index = (math.floor(util.now_ms() / 140) % #spinner_frames) + 1
-  local label = thread.generation == "tool_running" and "tooling"
+local function spinner_label(thread)
+  return thread.generation == "tool_running" and "tooling"
     or thread.generation == "waiting_backend" and "waiting"
     or thread.generation == "reconciling" and "syncing"
     or thread.generation == "cancelling" and "stopping"
     or "streaming"
-  return spinner_frames[index] .. "  Alma " .. label
+end
+
+spinner_virt_text = function(thread)
+  local index = (math.floor(util.now_ms() / 140) % #spinner_frames) + 1
+  return { { spinner_frames[index] .. "  Alma " .. spinner_label(thread), "AlmaSpinner" } }
+end
+
+local function spinner_placeholder_line()
+  return " "
+end
+
+local function schedule_spinner_tick(thread)
+  if not thread or not thread.id or not thread_busy(thread) then
+    return
+  end
+  local key = tostring(thread.id)
+  if pending_spinner_timers[key] then
+    return
+  end
+  pending_spinner_timers[key] = vim.defer_fn(function()
+    pending_spinner_timers[key] = nil
+    M.update_spinner(thread)
+  end, 140)
+end
+
+function M.update_spinner(thread)
+  if not thread or not thread.bufnr or not vim.api.nvim_buf_is_valid(thread.bufnr) then
+    return
+  end
+  if not thread_busy(thread) then
+    return
+  end
+  if not thread.spinner_mark then
+    return
+  end
+  apply_spinner_mark(thread, thread.bufnr, thread.spinner_mark)
+  schedule_spinner_tick(thread)
 end
 
 local function header(thread)
@@ -1366,16 +1426,53 @@ local function restore_suspended_folds(snapshots)
   end
 end
 
+local function changed_line_range(current, lines)
+  local current_count = #current
+  local next_count = #lines
+  local prefix = 0
+  local prefix_limit = math.min(current_count, next_count)
+  while prefix < prefix_limit and current[prefix + 1] == lines[prefix + 1] do
+    prefix = prefix + 1
+  end
+  if prefix == current_count and prefix == next_count then
+    return nil
+  end
+
+  local suffix = 0
+  local current_suffix_limit = current_count - prefix
+  local next_suffix_limit = next_count - prefix
+  while
+    suffix < current_suffix_limit
+    and suffix < next_suffix_limit
+    and current[current_count - suffix] == lines[next_count - suffix]
+  do
+    suffix = suffix + 1
+  end
+
+  local replacement = {}
+  for index = prefix + 1, next_count - suffix do
+    table.insert(replacement, lines[index])
+  end
+  return prefix, current_count - suffix, replacement
+end
+
 local function replace_buffer_lines(bufnr, lines)
+  local current = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local start_line, end_line, replacement = changed_line_range(current, lines)
+  if not start_line then
+    return false
+  end
+
   local fold_snapshots = suspend_window_folds(bufnr)
   local previous_undolevels = vim.bo[bufnr].undolevels
   vim.bo[bufnr].undolevels = -1
-  local ok, err = pcall(vim.api.nvim_buf_set_lines, bufnr, 0, -1, false, lines)
+  local ok, err = pcall(vim.api.nvim_buf_set_lines, bufnr, start_line, end_line, false, replacement)
   vim.bo[bufnr].undolevels = previous_undolevels
   restore_suspended_folds(fold_snapshots)
   if not ok then
     error(err)
   end
+  return true
 end
 
 function _G.AlmaFoldExpr(lnum)
@@ -1414,6 +1511,7 @@ function M.render(thread)
   thread.header_marks = {}
   thread.reasoning_marks = {}
   thread.stream_decoration_marks = {}
+  thread.spinner_mark = nil
   thread.spinner_marks = {}
   thread.composer_token_marks = {}
   thread.folds = {}
@@ -1439,7 +1537,7 @@ function M.render(thread)
   end
 
   if thread_busy(thread) then
-    local line = add(lines, spinner_line(thread))
+    local line = add(lines, spinner_placeholder_line())
     mark_spinner(thread, line)
     add(lines, "")
   end
@@ -1476,7 +1574,7 @@ function M.render(thread)
   apply_window_views(thread, bufnr, snapshots)
   prune_view_states(thread, bufnr)
   if thread_busy(thread) then
-    M.schedule(thread, 140)
+    schedule_spinner_tick(thread)
   end
 end
 

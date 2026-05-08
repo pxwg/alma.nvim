@@ -165,6 +165,24 @@ local function placeholder_overlay_text(bufnr, namespace, line)
   return ""
 end
 
+local function spinner_overlay_text(bufnr, namespace, line)
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, namespace, 0, -1, { details = true })) do
+    local details = mark[4] or {}
+    if mark[2] + 1 == line and details.virt_text_pos == "overlay" and details.virt_text then
+      local text = ""
+      local is_spinner = false
+      for _, chunk in ipairs(details.virt_text) do
+        text = text .. (chunk[1] or "")
+        is_spinner = is_spinner or chunk[2] == "AlmaSpinner"
+      end
+      if is_spinner then
+        return text
+      end
+    end
+  end
+  return ""
+end
+
 local function placeholder_virt_lines_text(bufnr, namespace, line)
   local out = {}
   for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, namespace, 0, -1, { details = true })) do
@@ -1393,17 +1411,15 @@ render.render(thread)
 local locked_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 local you_positions = {}
 local old_heading_count = 0
-local spinner_line_pos
 for index, line in ipairs(locked_lines) do
   if line == "## You" then
     table.insert(you_positions, index)
-  elseif line:find("Alma streaming", 1, true) then
-    spinner_line_pos = index
   end
   if line:match("^## You %[") or line:match("^## Alma %[") then
     old_heading_count = old_heading_count + 1
   end
 end
+local spinner_line_pos = thread.spinner_mark and thread.spinner_mark.line
 local composer_line = you_positions[#you_positions]
 assert_eq(#you_positions, 2, "submitted render keeps submitted user block and bottom composer")
 assert_eq(locked_lines[thread.prompt_start - 1], "## You", "submitted render keeps bottom composer")
@@ -1411,6 +1427,14 @@ assert_eq(locked_lines[thread.prompt_start], "", "submitted render breathes afte
 assert(not vim.tbl_contains(locked_lines, "⏳ Alma is thinking..."), "submitted render omits redundant loading assistant block")
 assert(not vim.tbl_contains(locked_lines, "## Alma"), "submitted render omits empty Alma section before streaming")
 assert(spinner_line_pos and spinner_line_pos < composer_line, "submitted render keeps spinner before composer")
+assert_eq(locked_lines[spinner_line_pos], " ", "submitted render uses stable spinner placeholder line")
+assert(
+  spinner_overlay_text(bufnr, render_ns, spinner_line_pos):find("Alma streaming", 1, true),
+  "submitted render draws spinner through overlay text"
+)
+local spinner_tick = vim.b[bufnr].changedtick
+render.update_spinner(thread)
+assert_eq(vim.b[bufnr].changedtick, spinner_tick, "spinner update does not rewrite buffer text")
 assert_eq(old_heading_count, 0, "submitted render avoids legacy state headings")
 assert_header_contains(bufnr, render_ns, you_positions[1], "test-model", "submitted user header model")
 assert_header_contains(bufnr, render_ns, you_positions[1], "effort xhigh", "submitted user header reasoning")
@@ -1462,6 +1486,9 @@ render.render(thread)
 assert_eq(vim.bo[bufnr].modifiable, true, "completed chat buffer is editable")
 assert(thread.prompt_start ~= nil, "completed render restores prompt")
 assert_eq(vim.api.nvim_win_get_cursor(sticky_win)[1], thread.prompt_start + 1, "sticky completed render returns cursor to prompt")
+local stable_changedtick = vim.b[bufnr].changedtick
+render.render(thread)
+assert_eq(vim.b[bufnr].changedtick, stable_changedtick, "unchanged render skips buffer rewrite")
 
 thread.blocks = history_blocks("history", 18)
 thread.pending_request = nil
