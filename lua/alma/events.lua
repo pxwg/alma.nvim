@@ -31,7 +31,10 @@ M.known_ws_events = {
   generation_completed = true,
   generation_error = true,
   stop_generation = true,
+  subagent_message = true,
+  subagent_message_added = true,
   subagent_message_delta = true,
+  subagent_message_completed = true,
 }
 
 M.global_ws_events = {}
@@ -68,18 +71,35 @@ function M.thread_id_from(raw)
   local message = data.message or raw.message or {}
   local thread = data.thread or raw.thread or {}
   local context = data.context or raw.context or {}
+  local task = data.task or raw.task or {}
   local name = raw.type or raw.event or raw.name
   local direct = data.threadId
     or data.thread_id
     or data.threadID
+    or data.parentThreadId
+    or data.parent_thread_id
     or thread.id
     or thread.threadId
+    or thread.thread_id
+    or thread.parentThreadId
+    or thread.parent_thread_id
     or message.threadId
     or message.thread_id
+    or message.parentThreadId
+    or message.parent_thread_id
     or context.threadId
     or context.thread_id
+    or context.parentThreadId
+    or context.parent_thread_id
+    or task.threadId
+    or task.thread_id
+    or task.threadID
+    or task.parentThreadId
+    or task.parent_thread_id
     or raw.threadId
     or raw.thread_id
+    or raw.parentThreadId
+    or raw.parent_thread_id
   if direct then
     return direct
   end
@@ -96,12 +116,22 @@ function M.thread_id_from(raw)
     data.id,
     data.parentId,
     data.parent_id,
+    data.parentThreadId,
+    data.parent_thread_id,
     data.slotId,
     data.slot_id,
+    message.parentThreadId,
+    message.parent_thread_id,
     context.parentMessageId,
     context.parent_message_id,
+    context.parentThreadId,
+    context.parent_thread_id,
+    task.parentThreadId,
+    task.parent_thread_id,
     raw.id,
     raw.parentId,
+    raw.parentThreadId,
+    raw.parent_thread_id,
     raw.slotId
   )
 end

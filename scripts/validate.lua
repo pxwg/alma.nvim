@@ -553,7 +553,16 @@ local subagent_delta = events.normalize_ws_event({
 })
 assert_eq(subagent_delta.thread_id, "validate-thread", "subagent event context thread id")
 assert_eq(subagent_delta.known, true, "subagent event known")
-assert_eq(events.is_thread_scoped_event("subagent_message_delta"), true, "subagent event is thread scoped")
+local subagent_message = events.normalize_ws_event({
+  type = "subagent_message",
+  data = { context = { parentThreadId = "validate-thread", taskId = "task-1" } },
+})
+assert_eq(subagent_message.thread_id, "validate-thread", "subagent message parent thread id")
+assert_eq(subagent_message.known, true, "subagent message event known")
+assert_eq(events.is_thread_scoped_event("subagent_message"), true, "subagent message is thread scoped")
+assert_eq(events.is_thread_scoped_event("subagent_message_added"), true, "subagent added event is thread scoped")
+assert_eq(events.is_thread_scoped_event("subagent_message_delta"), true, "subagent delta event is thread scoped")
+assert_eq(events.is_thread_scoped_event("subagent_message_completed"), true, "subagent completed event is thread scoped")
 assert_eq(events.is_global_ws_event("subagent_message_delta"), false, "subagent event is not global")
 assert_eq(events.is_global_ws_event("unknown_ws_event"), false, "unknown event is not global")
 local context_compaction_started = events.normalize_ws_event({
@@ -919,6 +928,79 @@ assert_eq(thread.local_blocks[3].type, "AssistantBlock", "streaming answer remai
 assert_eq(thread.local_blocks[3].text, "answer", "streaming answer block has answer text")
 assert_eq(reasoning_stream_effects[2].type, "render", "reasoning message_delta renders streaming update")
 
+thread.backend_generating = false
+thread.pending_request = nil
+thread.streaming_text = nil
+thread.streaming_reasoning_text = nil
+thread.local_blocks = {}
+thread.subagent_streams = {}
+thread.subagent_order = {}
+thread.generation = "idle"
+local _, subagent_added_effects = core.reduce_thread(thread, {
+  type = "ws_event",
+  name = "subagent_message_added",
+  known = true,
+  data = {
+    context = {
+      threadId = "validate-thread",
+      taskId = "task-alpha",
+      subagentMessageId = "subagent-msg-alpha",
+      parentToolCallId = "call-parent-alpha",
+      agentProfileName = "Developer",
+    },
+    message = {
+      role = "assistant",
+      parts = {
+        { type = "text", text = "delegated " },
+        {
+          type = "tool-Bash",
+          toolName = "Bash",
+          toolCallId = "call-sub",
+          state = "running",
+          args = { command = "pwd" },
+        },
+      },
+    },
+  },
+})
+assert_eq(thread.local_blocks[1].type, "AssistantBlock", "subagent added renders assistant block")
+assert_eq(thread.local_blocks[1].text, "delegated ", "subagent added preserves text")
+assert_eq(thread.local_blocks[1].metadata.subAgentName, "Developer", "subagent metadata keeps agent name")
+assert_eq(thread.local_blocks[1].metadata.role, "assistant", "subagent metadata keeps message role")
+assert_eq(thread.local_blocks[1].metadata.subAgentTaskId, "task-alpha", "subagent metadata keeps task id")
+assert_eq(thread.local_blocks[1].metadata.subAgentMessageId, "subagent-msg-alpha", "subagent metadata keeps message id")
+assert_eq(thread.local_blocks[1].metadata.parentToolCallId, "call-parent-alpha", "subagent metadata keeps parent tool call id")
+assert_eq(thread.local_blocks[1].event_type, "subagent_message", "subagent block keeps event type")
+assert_eq(thread.local_blocks[2].type, "ToolCallBlock", "subagent added renders tool block")
+assert_eq(thread.local_blocks[2].tool, "Bash", "subagent tool name is preserved")
+assert_eq(subagent_added_effects[2].type, "render", "subagent added renders streaming update")
+core.reduce_thread(thread, {
+  type = "ws_event",
+  name = "subagent_message_delta",
+  known = true,
+  data = {
+    context = { threadId = "validate-thread", taskId = "task-alpha", agentProfileName = "Developer" },
+    deltas = { { type = "text_append", partIndex = 0, text = "output" } },
+  },
+})
+assert_eq(thread.local_blocks[1].text, "delegated output", "subagent delta appends text by part index")
+core.reduce_thread(thread, {
+  type = "ws_event",
+  name = "subagent_message_completed",
+  known = true,
+  data = {
+    context = { threadId = "validate-thread", taskId = "task-alpha", agentProfileName = "Developer" },
+    deltas = { { type = "tool_output_set", partIndex = 1, state = "output-available", output = "done" } },
+  },
+})
+assert_eq(thread.local_blocks[1].state, "done", "subagent completed marks text block done")
+assert_eq(thread.local_blocks[2].state, "output-available", "subagent completed updates tool state")
+assert_eq(thread.local_blocks[2].output, "done", "subagent completed updates tool output")
+thread.subagent_streams = {}
+thread.subagent_order = {}
+thread.local_blocks = {}
+thread.generation = "idle"
+
 local persisted_stream_user = {
   id = "validate-thread--user-stream",
   message = {
@@ -1225,6 +1307,8 @@ assert_stream_decoration(
 )
 assert_no_stream_decoration(stream_thread, stream_marks, primary_assistant_block, "primary assistant gutter")
 local persisted_stream_lines = vim.api.nvim_buf_get_lines(stream_bufnr, 0, -1, false)
+assert(vim.tbl_contains(persisted_stream_lines, "## Alma researcher"), "subagent metadata block uses source header")
+assert(vim.tbl_contains(persisted_stream_lines, "## Alma Subagent"), "subagent event block uses fallback source header")
 for _, line in ipairs(persisted_stream_lines) do
   assert(not line:find("▌", 1, true), "tool gutter marker is virtual only")
   assert(not line:find("▎", 1, true), "timeline gutter marker is virtual only")
@@ -1247,6 +1331,10 @@ assert(next(vim.api.nvim_get_hl(0, { name = "AlmaStreamRaw", link = true })) ~= 
 assert(
   next(vim.api.nvim_get_hl(0, { name = "AlmaStreamSubAgent", link = true })) ~= nil,
   "subagent stream highlight is defined"
+)
+assert(
+  next(vim.api.nvim_get_hl(0, { name = "AlmaHeaderSubAgent1", link = true })) ~= nil,
+  "subagent header palette highlight is defined"
 )
 
 local token_thread = state.get_thread("validate-token-highlight-thread", { cwd = root })

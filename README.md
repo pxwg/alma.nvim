@@ -146,10 +146,14 @@ sent as Alma file parts while the original markdown stays visible locally.
 Alma buffers use the dedicated `alma` filetype while registering markdown and
 `markdown_inline` Tree-sitter services. If Tree-sitter is unavailable, they fall
 back to legacy markdown syntax; otherwise they avoid stacking both highlighters.
-They persist only chat text plus one-line placeholders for reasoning, tool calls, raw events, and agent timeline
-events. Placeholder bodies are rendered with extmark virtual lines when expanded
-via `za` or `:AlmaToggleBlock`, so large tool payloads no longer inflate the
-markdown-like buffer. Use `:AlmaToolDetails` for the full, untruncated payload.
+They persist only chat text plus one-line placeholders for reasoning, tool
+calls, raw events, agent timeline events, and subagent streams. Subagent output
+is rendered as its own `Alma Subagent` source when Alma emits
+`subagent_message*` WebSocket events, color-keyed per subagent without showing
+raw task/message/call metadata in the header. Placeholder bodies are rendered
+with extmark virtual lines when expanded via `za` or `:AlmaToggleBlock`, so large
+tool payloads no longer inflate the markdown-like buffer. Use
+`:AlmaToolDetails` for the full, untruncated payload.
 
 Tool output rendering still uses a registry for expanded/detail views. Built-in
 renderers format `Bash`, `Read`, `Edit`, `Write`, `Grep`, and `Glob` with

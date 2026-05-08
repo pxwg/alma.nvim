@@ -58,10 +58,24 @@ local stream_decoration_by_type = {
 }
 
 local subagent_decoration = { kind = "subagent", marker = "▸ ", hl_group = "AlmaStreamSubAgent" }
+local subagent_header_groups = {
+  "AlmaHeaderSubAgent1",
+  "AlmaHeaderSubAgent2",
+  "AlmaHeaderSubAgent3",
+  "AlmaHeaderSubAgent4",
+  "AlmaHeaderSubAgent5",
+}
 
 local function setup_highlights()
   vim.api.nvim_set_hl(0, "AlmaHeaderUser", { default = true, link = "Identifier" })
   vim.api.nvim_set_hl(0, "AlmaHeaderAssistant", { default = true, link = "Title" })
+  vim.api.nvim_set_hl(0, "AlmaHeaderSubAgent1", { default = true, link = "DiagnosticOk" })
+  vim.api.nvim_set_hl(0, "AlmaHeaderSubAgent2", { default = true, link = "DiagnosticInfo" })
+  vim.api.nvim_set_hl(0, "AlmaHeaderSubAgent3", { default = true, link = "DiagnosticHint" })
+  vim.api.nvim_set_hl(0, "AlmaHeaderSubAgent4", { default = true, link = "DiagnosticWarn" })
+  vim.api.nvim_set_hl(0, "AlmaHeaderSubAgent5", { default = true, link = "Special" })
+  vim.api.nvim_set_hl(0, "AlmaHeaderSubAgentRole", { default = true, link = "Type" })
+  vim.api.nvim_set_hl(0, "AlmaHeaderSubAgentId", { default = true, link = "Constant" })
   vim.api.nvim_set_hl(0, "AlmaHeaderSection", { default = true, link = "Special" })
   vim.api.nvim_set_hl(0, "AlmaHeaderMeta", { default = true, link = "Comment" })
   vim.api.nvim_set_hl(0, "AlmaHeaderSeparator", { default = true, link = "Comment" })
@@ -259,7 +273,98 @@ local function stream_decoration_for_block(block)
   return stream_decoration_by_type[block.type]
 end
 
+local function subagent_label_value(value)
+  if type(value) ~= "string" or value == "" then
+    return nil
+  end
+  if #value > 32 then
+    return "Subagent " .. util.short_id(value)
+  end
+  return value
+end
+
+local function subagent_label_from(value)
+  if type(value) ~= "table" then
+    return nil
+  end
+  return subagent_label_value(first_string(
+    value.subAgentName,
+    value.subagentName,
+    value.agentProfileName,
+    value.agentName,
+    value.subAgentRole,
+    value.subagentRole,
+    value.subAgentId,
+    value.subagentId,
+    value.agentProfileId,
+    value.subAgentTaskId,
+    value.taskId,
+    value.task_id
+  ))
+end
+
+local function subagent_identity_from(block)
+  if type(block) ~= "table" then
+    return nil
+  end
+  local metadata_value = block.metadata or {}
+  local raw = block.raw or {}
+  local data = type(raw.data) == "table" and raw.data or raw
+  return first_string(
+    metadata_value.subAgentTaskId,
+    metadata_value.subAgentId,
+    metadata_value.subagentId,
+    metadata_value.taskId,
+    raw.taskId,
+    raw.task_id,
+    data.taskId,
+    data.task_id,
+    data.context and data.context.taskId,
+    data.context and data.context.task_id
+  )
+end
+
+local function subagent_header_hl(block)
+  local identity = subagent_identity_from(block) or "subagent"
+  local hash = 0
+  for index = 1, #identity do
+    hash = hash + identity:byte(index)
+  end
+  return subagent_header_groups[(hash % #subagent_header_groups) + 1]
+end
+
+local function meta_entry(text, hl_group)
+  if not text or text == "" then
+    return nil
+  end
+  return { text = text, hl_group = hl_group }
+end
+
+local function append_meta_entry(labels, text, hl_group)
+  local item = meta_entry(text, hl_group)
+  if item then
+    table.insert(labels, item)
+  end
+end
+
+local function assistant_title(block)
+  if not block_has_subagent_signal(block) then
+    return "Alma"
+  end
+  local raw = block.raw or {}
+  local data = type(raw.data) == "table" and raw.data or raw
+  local label = subagent_label_from(block.metadata)
+    or subagent_label_from(raw.context)
+    or subagent_label_from(data.context)
+    or subagent_label_from(data)
+    or "Subagent"
+  return "Alma " .. label
+end
+
 local function assistant_meta(thread, block)
+  if block_has_subagent_signal(block) then
+    return {}
+  end
   local request = block and block.local_only and thread.pending_request or nil
   return metadata.assistant_labels(thread, block, request)
 end
@@ -294,6 +399,20 @@ local function header_hl(kind)
     return "AlmaHeaderAssistant"
   end
   return "AlmaHeaderSection"
+end
+
+local function header_title_hl(mark)
+  if mark.kind == "subagent" then
+    return subagent_header_hl(mark.block)
+  end
+  return header_hl(mark.kind)
+end
+
+local function meta_chunk(item)
+  if type(item) == "table" then
+    return tostring(item.text or item[1] or ""), item.hl_group or item.hl or "AlmaHeaderMeta"
+  end
+  return tostring(item or ""), "AlmaHeaderMeta"
 end
 
 local function mark_header(thread, line, kind, title, meta, block)
@@ -418,9 +537,19 @@ end
 
 local function header_virt_text(mark, target_width)
   local title = " " .. tostring(mark.title or "") .. " "
-  local chunks = { { title, header_hl(mark.kind) } }
+  local chunks = { { title, header_title_hl(mark) } }
   if mark.meta and #mark.meta > 0 then
-    table.insert(chunks, { " " .. table.concat(mark.meta, " · ") .. " ", "AlmaHeaderMeta" })
+    table.insert(chunks, { " ", "AlmaHeaderMeta" })
+    for index, item in ipairs(mark.meta) do
+      local text, hl_group = meta_chunk(item)
+      if text ~= "" then
+        if index > 1 then
+          table.insert(chunks, { " · ", "AlmaHeaderMeta" })
+        end
+        table.insert(chunks, { text, hl_group })
+      end
+    end
+    table.insert(chunks, { " ", "AlmaHeaderMeta" })
   end
   local sep = config.get().render.separator or "───"
   local remaining = math.max(vim.fn.strdisplaywidth(sep), target_width - chunks_width(chunks))
@@ -451,8 +580,9 @@ local function placeholder_virt_text(mark)
     { tostring(mark.title or "Block"), "AlmaBlockPlaceholderTitle" },
   }
   for _, item in ipairs(mark.meta or {}) do
-    if item and item ~= "" then
-      table.insert(chunks, { " · " .. tostring(item), "AlmaBlockPlaceholderMeta" })
+    local text = type(item) == "table" and (item.text or item[1]) or item
+    if text and text ~= "" then
+      table.insert(chunks, { " · " .. tostring(text), "AlmaBlockPlaceholderMeta" })
     end
   end
   if mark.show_hint ~= false then
@@ -789,8 +919,10 @@ render_block = function(thread, lines, block, opts)
     add_text(lines, block.text)
   elseif block.type == "AssistantBlock" then
     if not opts.assistant_body then
-      local line = add(lines, "## Alma")
-      mark_header(thread, line, "assistant", "Alma", assistant_meta(thread, block), block)
+      local title = assistant_title(block)
+      local header_kind = block_has_subagent_signal(block) and "subagent" or "assistant"
+      local line = add(lines, "## " .. title)
+      mark_header(thread, line, header_kind, title, assistant_meta(thread, block), block)
       add(lines, "")
     end
     add_text(lines, block.text)
@@ -838,8 +970,10 @@ end
 local function render_assistant_group(thread, lines, blocks, index)
   local group_id = assistant_group_id(blocks[index])
   local first_block = blocks[index]
-  local line = add(lines, "## Alma")
-  mark_header(thread, line, "assistant", "Alma", assistant_meta(thread, first_block), first_block)
+  local title = assistant_title(first_block)
+  local header_kind = block_has_subagent_signal(first_block) and "subagent" or "assistant"
+  local line = add(lines, "## " .. title)
+  mark_header(thread, line, header_kind, title, assistant_meta(thread, first_block), first_block)
   add(lines, "")
 
   while index <= #blocks and assistant_group_id(blocks[index]) == group_id do
