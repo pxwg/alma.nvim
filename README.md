@@ -132,8 +132,8 @@ Token-only lines configure a request and are removed from the final prompt:
 - `@Bash`, `@Read`, `@Grep`, `@Glob`, `@Task`, `@mcp:<server>` configure tools.
 - `$model:<id>`, `$reasoning:low|medium|high|xhigh`, `$temp:<n>`, `$no-tools`
   configure generation.
-- `>buffer`, `>selection`, `>diagnostics`, `>diff`, `>file:<path>`, `>zk:<id>`
-  add structured ephemeral context metadata.
+- `>buffer`, `>selection`, `>diagnostics`, `>diff`, and `>file:<path>` add
+  structured ephemeral context metadata.
 
 Unknown token-only lines are kept in the prompt and surfaced as warnings.
 

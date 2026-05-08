@@ -34,7 +34,6 @@ local static = {
     { label = ">diagnostics", detail = "Attach current buffer diagnostics" },
     { label = ">diff", detail = "Attach project diff reference" },
     { label = ">file:<path>", detail = "Attach a file path reference" },
-    { label = ">zk:<id>", detail = "Attach a ZK note id reference" },
   },
 }
 

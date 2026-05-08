@@ -101,7 +101,6 @@ Token-only prompt lines configure the request:
   >diagnostics
   >diff
   >file:<path>
-  >zk:<id>
 
 Reliability~
 

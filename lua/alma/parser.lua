@@ -180,10 +180,6 @@ local function context_for_token(token)
   if file then
     return { type = "file", path = vim.fn.fnamemodify(file, ":p") }
   end
-  local zk = token:match("^>zk:(.+)$")
-  if zk then
-    return { type = "zk", id = zk }
-  end
   return nil
 end
 
