@@ -921,7 +921,6 @@ local function thread_workspace_virt_text(thread, bufnr, title_line)
     return nil
   end
   local candidates = {
-    { { "workspace: " .. tostring(label), "Comment" } },
     { { tostring(label), "Comment" } },
   }
   local available = narrowest_buffer_text_width(bufnr) - vim.fn.strdisplaywidth(title_line or "") - 2
