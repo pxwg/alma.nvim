@@ -394,6 +394,18 @@ local function window_text_width(win)
   return math.max(20, width)
 end
 
+local function narrowest_buffer_text_width(bufnr)
+  local width = vim.o.columns
+  local found = false
+  for _, win in ipairs(vim.fn.win_findbuf(bufnr)) do
+    if vim.api.nvim_win_is_valid(win) then
+      width = math.min(width, window_text_width(win))
+      found = true
+    end
+  end
+  return math.max(20, found and width or vim.o.columns)
+end
+
 local function header_target_width(bufnr)
   local width = vim.o.columns
   for _, win in ipairs(vim.fn.win_findbuf(bufnr)) do
@@ -887,6 +899,46 @@ local function header(thread)
   return { "# Alma: " .. tostring(thread.title or thread.id) }
 end
 
+local function status_chunks_fit(chunks, available_width)
+  if not chunks or #chunks == 0 then
+    return nil
+  end
+  if chunks_width(chunks) <= available_width then
+    return chunks
+  end
+  return nil
+end
+
+local function thread_status_virt_text(thread, bufnr, title_line)
+  local model = tostring(metadata.model_label(thread.config.model) or "default")
+  local reasoning = tostring(thread.config.reasoning_effort or "default")
+  local ctx = metadata.context_label(thread)
+  local candidates = {
+    {
+      { "model: " .. model, "Comment" },
+      { " / reasoning: " .. reasoning, "Comment" },
+    },
+    {
+      { model, "Comment" },
+      { " · " .. reasoning, "Comment" },
+    },
+    {
+      { model, "Comment" },
+    },
+  }
+  if ctx then
+    table.insert(candidates[1], { " / " .. tostring(ctx), "Comment" })
+  end
+  local available = narrowest_buffer_text_width(bufnr) - vim.fn.strdisplaywidth(title_line or "") - 2
+  for _, chunks in ipairs(candidates) do
+    local fit = status_chunks_fit(chunks, available)
+    if fit then
+      return fit
+    end
+  end
+  return nil
+end
+
 local function ensure_view_state(thread)
   thread.view_state = thread.view_state or {}
   return thread.view_state
@@ -1240,7 +1292,9 @@ function M.render(thread)
   thread.fold_levels = {}
 
   local lines = {}
+  local title_line = nil
   for _, line in ipairs(header(thread)) do
+    title_line = title_line or line
     add(lines, line)
   end
   add(lines, "")
@@ -1283,18 +1337,13 @@ function M.render(thread)
   apply_composer_token_marks(thread, bufnr)
   vim.bo[bufnr].modifiable = true
 
-  local virt = {
-    { "model: " .. tostring(metadata.model_label(thread.config.model) or "default"), "Comment" },
-    { " / reasoning: " .. tostring(thread.config.reasoning_effort or "default"), "Comment" },
-  }
-  local ctx = metadata.context_label(thread)
-  if ctx then
-    table.insert(virt, { " / " .. tostring(ctx), "Comment" })
+  local virt = thread_status_virt_text(thread, bufnr, title_line)
+  if virt then
+    vim.api.nvim_buf_set_extmark(bufnr, ns, 0, 0, {
+      virt_text = virt,
+      virt_text_pos = "right_align",
+    })
   end
-  vim.api.nvim_buf_set_extmark(bufnr, ns, 0, 0, {
-    virt_text = virt,
-    virt_text_pos = "right_align",
-  })
 
   apply_window_views(thread, bufnr, snapshots)
   prune_view_states(thread, bufnr)
