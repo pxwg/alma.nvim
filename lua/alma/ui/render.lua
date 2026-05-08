@@ -909,26 +909,21 @@ local function status_chunks_fit(chunks, available_width)
   return nil
 end
 
-local function thread_status_virt_text(thread, bufnr, title_line)
-  local model = tostring(metadata.model_label(thread.config.model) or "default")
-  local reasoning = tostring(thread.config.reasoning_effort or "default")
-  local ctx = metadata.context_label(thread)
-  local candidates = {
-    {
-      { "model: " .. model, "Comment" },
-      { " / reasoning: " .. reasoning, "Comment" },
-    },
-    {
-      { model, "Comment" },
-      { " · " .. reasoning, "Comment" },
-    },
-    {
-      { model, "Comment" },
-    },
-  }
-  if ctx then
-    table.insert(candidates[1], { " / " .. tostring(ctx), "Comment" })
+local function workspace_label(thread)
+  local workspace = thread and thread.workspace or {}
+  local path = workspace.path or thread and thread.cwd
+  return workspace.name or (path and vim.fn.fnamemodify(path, ":t")) or workspace.id
+end
+
+local function thread_workspace_virt_text(thread, bufnr, title_line)
+  local label = workspace_label(thread)
+  if not label or label == "" then
+    return nil
   end
+  local candidates = {
+    { { "workspace: " .. tostring(label), "Comment" } },
+    { { tostring(label), "Comment" } },
+  }
   local available = narrowest_buffer_text_width(bufnr) - vim.fn.strdisplaywidth(title_line or "") - 2
   for _, chunks in ipairs(candidates) do
     local fit = status_chunks_fit(chunks, available)
@@ -1337,7 +1332,7 @@ function M.render(thread)
   apply_composer_token_marks(thread, bufnr)
   vim.bo[bufnr].modifiable = true
 
-  local virt = thread_status_virt_text(thread, bufnr, title_line)
+  local virt = thread_workspace_virt_text(thread, bufnr, title_line)
   if virt then
     vim.api.nvim_buf_set_extmark(bufnr, ns, 0, 0, {
       virt_text = virt,
