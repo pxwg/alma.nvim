@@ -6,6 +6,8 @@ local workspace = require("alma.workspace")
 local M = {}
 
 M._setup = false
+M.context = require("alma.context")
+M.hooks = require("alma.hooks")
 
 local function setup_filetype_services()
   if vim.treesitter and vim.treesitter.language and vim.treesitter.language.register then

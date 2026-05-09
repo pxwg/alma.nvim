@@ -95,6 +95,12 @@ local function setup_highlights()
   vim.api.nvim_set_hl(0, "AlmaBlockPlaceholderTitle", { default = true, link = "Special" })
   vim.api.nvim_set_hl(0, "AlmaBlockPlaceholderMeta", { default = true, link = "Comment" })
   vim.api.nvim_set_hl(0, "AlmaBlockPlaceholderHint", { default = true, link = "DiagnosticHint" })
+  vim.api.nvim_set_hl(0, "AlmaCrewProgressTitle", { default = true, link = "Special" })
+  vim.api.nvim_set_hl(0, "AlmaCrewProgressActive", { default = true, link = "DiagnosticInfo" })
+  vim.api.nvim_set_hl(0, "AlmaCrewProgressDone", { default = true, link = "DiagnosticOk" })
+  vim.api.nvim_set_hl(0, "AlmaCrewProgressError", { default = true, link = "DiagnosticError" })
+  vim.api.nvim_set_hl(0, "AlmaCrewProgressPending", { default = true, link = "Comment" })
+  vim.api.nvim_set_hl(0, "AlmaCrewProgressMeta", { default = true, link = "Comment" })
 end
 
 local function add(lines, value)
@@ -169,6 +175,184 @@ local function first_string(...)
   return nil
 end
 
+local function list_value(value)
+  return type(value) == "table" and value or {}
+end
+
+local function crew_status_symbol(status)
+  status = tostring(status or ""):lower()
+  if status == "completed" or status == "passed" or status == "accepted" or status == "done" then
+    return "✓"
+  end
+  if status == "failed" or status == "cancelled" or status == "blocked" or status == "output-error" then
+    return "✗"
+  end
+  if status == "active" or status == "running" or status == "queued" then
+    return "●"
+  end
+  return "○"
+end
+
+local function crew_status_hl(status)
+  status = tostring(status or ""):lower()
+  if status == "completed" or status == "passed" or status == "accepted" or status == "done" then
+    return "AlmaCrewProgressDone"
+  end
+  if status == "failed" or status == "cancelled" or status == "blocked" or status == "output-error" then
+    return "AlmaCrewProgressError"
+  end
+  if status == "active" or status == "running" or status == "queued" then
+    return "AlmaCrewProgressActive"
+  end
+  return "AlmaCrewProgressPending"
+end
+
+local function crew_phase_label(phase)
+  local labels = {
+    planning = "Planning",
+    contracting = "Contracting",
+    generating = "Building",
+    evaluating = "Evaluating",
+    completed = "Done",
+    failed = "Failed",
+  }
+  return labels[tostring(phase or "")] or "Running"
+end
+
+local function crew_progress_bar(done, total, width)
+  width = width or 10
+  done = tonumber(done) or 0
+  total = tonumber(total) or 0
+  if total <= 0 then
+    return string.rep("░", width)
+  end
+  local filled = math.max(1, math.min(width, math.floor((done / total) * width + 0.5)))
+  return string.rep("█", filled) .. string.rep("░", width - filled)
+end
+
+local function crew_mission_summary(mission)
+  local summary = type(mission.summary) == "table" and mission.summary or {}
+  if summary.totalRuns ~= nil then
+    return summary
+  end
+  local runs = list_value(mission.runs)
+  local computed = { totalRuns = #runs, completedRuns = 0, failedRuns = 0, activeRuns = 0 }
+  for _, run in ipairs(runs) do
+    if run.status == "completed" then
+      computed.completedRuns = computed.completedRuns + 1
+    elseif run.status == "failed" or run.status == "cancelled" then
+      computed.failedRuns = computed.failedRuns + 1
+    elseif run.status == "running" or run.status == "queued" then
+      computed.activeRuns = computed.activeRuns + 1
+    end
+  end
+  return computed
+end
+
+local function crew_active_sprint(sprints)
+  for _, sprint in ipairs(list_value(sprints)) do
+    if sprint.status == "active" then
+      return sprint
+    end
+  end
+  return nil
+end
+
+local function crew_sprint_progress(sprints)
+  local passed = 0
+  for _, sprint in ipairs(list_value(sprints)) do
+    if sprint.status == "passed" then
+      passed = passed + 1
+    end
+  end
+  return passed, #list_value(sprints)
+end
+
+local function crew_regular_step(mission)
+  for _, run in ipairs(list_value(mission.runs)) do
+    if run.status == "running" or run.status == "queued" then
+      return compact_text(first_string(run.outputSummary, run.inputSummary, run.status) or "Running", 72)
+    end
+  end
+  for _, handoff in ipairs(list_value(mission.handoffs)) do
+    if handoff.status == "pending" or handoff.status == "accepted" then
+      local packet = type(handoff.packet) == "table" and handoff.packet or {}
+      return compact_text(first_string(packet.goal, packet.deliverable, handoff.status) or "Handoff", 72)
+    end
+  end
+  return nil
+end
+
+local function crew_mission_progress(mission)
+  if mission.harnessMode == "sprint-harness" then
+    local done, total = crew_sprint_progress(mission.sprints)
+    local active = crew_active_sprint(mission.sprints)
+    local step = active and string.format(
+      "%s: S%s %s",
+      crew_phase_label(mission.currentPhase),
+      tostring(active.sprintNumber or active.number or "?"),
+      compact_text(active.title or "Sprint", 56)
+    ) or crew_phase_label(mission.currentPhase)
+    return done, total, step, mission.currentPhase
+  end
+  local summary = crew_mission_summary(mission)
+  local done = tonumber(summary.completedRuns) or 0
+  local total = tonumber(summary.totalRuns) or #list_value(mission.runs)
+  return done, total, crew_regular_step(mission), mission.status
+end
+
+local function crew_progress_virt_lines(thread)
+  local lines = {}
+  local missions = list_value(thread and thread.agent_crew and thread.agent_crew.missions)
+  for _, mission in ipairs(missions) do
+    local done, total, step, status = crew_mission_progress(mission)
+    local status_hl = crew_status_hl(status or mission.status)
+    local title = compact_text(mission.title or "Task", 42)
+    local progress = total > 0 and string.format("%d/%d", done, total) or tostring(mission.status or status or "running")
+    local chunks = {
+      { "  " .. crew_status_symbol(status or mission.status) .. " ", status_hl },
+      { title, "AlmaCrewProgressTitle" },
+      { " [" .. crew_progress_bar(done, total) .. "] ", "AlmaCrewProgressMeta" },
+      { progress, status_hl },
+    }
+    if step and step ~= "" then
+      table.insert(chunks, { " · " .. step, "AlmaCrewProgressMeta" })
+    end
+    table.insert(lines, chunks)
+  end
+
+  if #lines > 0 then
+    return lines
+  end
+
+  for _, task_id in ipairs(list_value(thread and thread.subagent_order)) do
+    local acc = thread.subagent_streams and thread.subagent_streams[task_id]
+    if acc then
+      local context = acc.context or {}
+      local label = first_string(
+        context.subAgentName,
+        context.subagentName,
+        context.agentProfileName,
+        context.agentName,
+        context.subAgentRole,
+        context.subagentRole,
+        context.taskId,
+        task_id
+      ) or "Task"
+      local done = acc.is_streaming and 0 or 1
+      local status = acc.is_streaming and "running" or "done"
+      local status_hl = crew_status_hl(status)
+      table.insert(lines, {
+        { "  " .. crew_status_symbol(status) .. " ", status_hl },
+        { compact_text(label, 42), "AlmaCrewProgressTitle" },
+        { " [" .. crew_progress_bar(done, 1) .. "] ", "AlmaCrewProgressMeta" },
+        { status, status_hl },
+      })
+    end
+  end
+  return #lines > 0 and lines or nil
+end
+
 local function normalize_key(value)
   if type(value) ~= "string" then
     return ""
@@ -191,12 +375,16 @@ local function is_subagent_event_name(value)
 end
 
 local subagent_metadata_keys = {
+  parenttoolcallid = true,
   subagent = true,
   subagentid = true,
-  subagentname = true,
-  subagentrole = true,
-  subagenttype = true,
+  subagentmessageid = true,
   subagentmodel = true,
+  subagentname = true,
+  subagentparentmessageid = true,
+  subagentrole = true,
+  subagenttaskid = true,
+  subagenttype = true,
 }
 
 local subagent_value_keys = {
@@ -299,6 +487,11 @@ local function subagent_label_from(value)
     value.subagentId,
     value.agentProfileId,
     value.subAgentTaskId,
+    value.subagentTaskId,
+    value.subAgentMessageId,
+    value.subagentMessageId,
+    value.parentToolCallId,
+    value.parent_tool_call_id,
     value.taskId,
     value.task_id
   ))
@@ -313,13 +506,22 @@ local function subagent_identity_from(block)
   local data = type(raw.data) == "table" and raw.data or raw
   return first_string(
     metadata_value.subAgentTaskId,
+    metadata_value.subagentTaskId,
+    metadata_value.subAgentMessageId,
+    metadata_value.subagentMessageId,
     metadata_value.subAgentId,
     metadata_value.subagentId,
+    metadata_value.parentToolCallId,
+    metadata_value.parent_tool_call_id,
     metadata_value.taskId,
     raw.taskId,
     raw.task_id,
+    raw.parentToolCallId,
+    raw.parent_tool_call_id,
     data.taskId,
     data.task_id,
+    data.parentToolCallId,
+    data.parent_tool_call_id,
     data.context and data.context.taskId,
     data.context and data.context.task_id
   )
@@ -348,23 +550,95 @@ local function append_meta_entry(labels, text, hl_group)
   end
 end
 
+local function subagent_values(block)
+  local raw = block and block.raw or {}
+  local data = type(raw.data) == "table" and raw.data or raw
+  local raw_context = type(raw.context) == "table" and raw.context or {}
+  local data_context = type(data.context) == "table" and data.context or {}
+  return block and block.metadata or {}, raw_context, data_context, data
+end
+
+local function subagent_title_label(block)
+  local block_metadata, raw_context, data_context, data = subagent_values(block)
+  return subagent_label_from(block_metadata)
+    or subagent_label_from(raw_context)
+    or subagent_label_from(data_context)
+    or subagent_label_from(data)
+    or "Subagent"
+end
+
 local function assistant_title(block)
   if not block_has_subagent_signal(block) then
     return "Alma"
   end
-  local raw = block.raw or {}
-  local data = type(raw.data) == "table" and raw.data or raw
-  local label = subagent_label_from(block.metadata)
-    or subagent_label_from(raw.context)
-    or subagent_label_from(data.context)
-    or subagent_label_from(data)
-    or "Subagent"
-  return "Alma " .. label
+  return "Alma " .. subagent_title_label(block)
+end
+
+local function subagent_meta(block)
+  local labels = {}
+  local block_metadata, raw_context, data_context, data = subagent_values(block)
+  local title_label = subagent_title_label(block)
+  local status = first_string(block and block.state)
+  local role = first_string(
+    block_metadata.subAgentRole,
+    block_metadata.subagentRole,
+    raw_context.subAgentRole,
+    raw_context.subagentRole,
+    data_context.subAgentRole,
+    data_context.subagentRole,
+    block_metadata.agentProfileName,
+    raw_context.agentProfileName,
+    data_context.agentProfileName,
+    data.agentProfileName
+  )
+  local agent_type = first_string(
+    block_metadata.subAgentType,
+    block_metadata.subagentType,
+    raw_context.subAgentType,
+    raw_context.subagentType,
+    data_context.subAgentType,
+    data_context.subagentType,
+    block_metadata.agentProfileId,
+    raw_context.agentProfileId,
+    data_context.agentProfileId,
+    data.agentProfileId
+  )
+  local task_id = first_string(
+    block_metadata.subAgentTaskId,
+    block_metadata.subagentTaskId,
+    block_metadata.subAgentMessageId,
+    block_metadata.subagentMessageId,
+    block_metadata.parentToolCallId,
+    block_metadata.parent_tool_call_id,
+    block_metadata.taskId,
+    raw_context.taskId,
+    raw_context.task_id,
+    raw_context.parentToolCallId,
+    raw_context.parent_tool_call_id,
+    data_context.taskId,
+    data_context.task_id,
+    data_context.parentToolCallId,
+    data_context.parent_tool_call_id,
+    data.taskId,
+    data.task_id,
+    data.parentToolCallId,
+    data.parent_tool_call_id
+  )
+
+  append_meta_entry(labels, status, status == "streaming" and "AlmaHeaderSubAgentRole" or "AlmaHeaderMeta")
+  if role and role ~= title_label then
+    append_meta_entry(labels, role, "AlmaHeaderSubAgentRole")
+  end
+  append_meta_entry(labels, agent_type, "AlmaHeaderSubAgentId")
+  if task_id then
+    append_meta_entry(labels, "task " .. util.short_id(task_id), "AlmaHeaderSubAgentId")
+  end
+  return labels
 end
 
 local function assistant_meta(thread, block)
   if block_has_subagent_signal(block) then
-    return {}
+    return subagent_meta(block)
   end
   local request = block and block.local_only and thread.pending_request or nil
   return metadata.assistant_labels(thread, block, request)
@@ -804,6 +1078,29 @@ local function apply_composer_token_marks(thread, bufnr)
   end
 end
 
+local function mark_crew_progress(thread, line)
+  local virt_lines = crew_progress_virt_lines(thread)
+  if virt_lines and #virt_lines > 0 then
+    thread.crew_progress_mark = { line = line, virt_lines = virt_lines }
+  end
+end
+
+local function apply_crew_progress_mark(thread, bufnr)
+  local mark = thread.crew_progress_mark
+  if not mark or not mark.line or not mark.virt_lines then
+    return
+  end
+  if mark.line < 1 or mark.line > vim.api.nvim_buf_line_count(bufnr) then
+    return
+  end
+  vim.api.nvim_buf_set_extmark(bufnr, ns, mark.line - 1, 0, {
+    virt_lines = mark.virt_lines,
+    virt_lines_above = false,
+    priority = 1250,
+    strict = false,
+  })
+end
+
 local function tool_summary(block)
   return tool_renderers.summary(block)
 end
@@ -943,16 +1240,27 @@ render_block = function(thread, lines, block, opts)
     add(lines, "")
     add_text(lines, block.text)
   elseif block.type == "AssistantBlock" then
+    local is_subagent_block = block_has_subagent_signal(block)
     if not opts.assistant_body then
       local title = assistant_title(block)
-      local header_kind = block_has_subagent_signal(block) and "subagent" or "assistant"
+      local header_kind = is_subagent_block and "subagent" or "assistant"
       local line = add(lines, "## " .. title)
       mark_header(thread, line, header_kind, title, assistant_meta(thread, block), block)
       add(lines, "")
     end
-    add_text(lines, block.text)
+    if not is_subagent_block then
+      add_text(lines, block.text)
+    end
   elseif placeholder_types[block.type] then
-    render_placeholder(thread, lines, block, opts)
+    if block_has_subagent_signal(block) then
+      if not opts.assistant_body then
+        local title = assistant_title(block)
+        local line = add(lines, "## " .. title)
+        mark_header(thread, line, "subagent", title, assistant_meta(thread, block), block)
+      end
+    else
+      render_placeholder(thread, lines, block, opts)
+    end
   elseif block.type == "ErrorBlock" then
     local line = add(lines, "### Error")
     mark_header(thread, line, "section", "Error", {}, block)
@@ -996,10 +1304,18 @@ local function render_assistant_group(thread, lines, blocks, index)
   local group_id = assistant_group_id(blocks[index])
   local first_block = blocks[index]
   local title = assistant_title(first_block)
-  local header_kind = block_has_subagent_signal(first_block) and "subagent" or "assistant"
+  local is_subagent_group = block_has_subagent_signal(first_block)
+  local header_kind = is_subagent_group and "subagent" or "assistant"
   local line = add(lines, "## " .. title)
   mark_header(thread, line, header_kind, title, assistant_meta(thread, first_block), first_block)
   add(lines, "")
+
+  if is_subagent_group then
+    while index <= #blocks and assistant_group_id(blocks[index]) == group_id do
+      index = index + 1
+    end
+    return index
+  end
 
   while index <= #blocks and assistant_group_id(blocks[index]) == group_id do
     render_block(thread, lines, blocks[index], { assistant_body = true, block_index = index })
@@ -1514,6 +1830,7 @@ function M.render(thread)
   thread.spinner_mark = nil
   thread.spinner_marks = {}
   thread.composer_token_marks = {}
+  thread.crew_progress_mark = nil
   thread.folds = {}
   thread.fold_levels = {}
 
@@ -1550,6 +1867,7 @@ function M.render(thread)
     add(lines, prompt_line)
   end
   thread.prompt_start = prompt_start
+  mark_crew_progress(thread, #lines)
   build_fold_levels(thread)
 
   vim.bo[bufnr].modifiable = true
@@ -1561,6 +1879,7 @@ function M.render(thread)
   apply_stream_decoration_marks(thread, bufnr)
   apply_spinner_marks(thread, bufnr)
   apply_composer_token_marks(thread, bufnr)
+  apply_crew_progress_mark(thread, bufnr)
   vim.bo[bufnr].modifiable = true
 
   local virt = thread_workspace_virt_text(thread, bufnr, title_line)

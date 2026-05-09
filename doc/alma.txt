@@ -31,6 +31,8 @@ floating window.
 `:Alma sidebar [thread_id]` opens the current or requested Alma thread in a
 right-side split.
 
+`:Alma crews` opens the current thread's agent crew summary.
+
                                                         *:AlmaHealth*
 `:AlmaHealth` checks Neovim, curl, and Alma API availability.
 
@@ -64,6 +66,13 @@ it reads the editable bottom `## You` composer in the current Alma buffer.
 
                                                         *:AlmaToolDetails*
 `:AlmaToolDetails` opens a scratch detail buffer for the block under cursor.
+
+                                                        *:AlmaAgentCrew*
+`:AlmaAgentCrew` opens the current thread's native Alma crew timeline. It fetches
+`/api/threads/{id}/agent-crew` and renders missions, sprint progress, active
+steps, contracts, evaluations, handoffs, and runs. The same data is also shown as
+compact virtual progress lines below the bottom composer. `:Alma crews` opens the
+same view.
 
                                                         *:AlmaQuickfix*
 `:AlmaQuickfix` extracts file locations from the current thread into quickfix.
@@ -101,6 +110,56 @@ Token-only prompt lines configure the request:
   >diagnostics
   >diff
   >file:<path>
+
+Extension hooks~
+
+`require("alma.hooks")` exposes generic lifecycle hooks through `on()` and the
+alias `register()`. Callback failures are contained with `pcall`, and each hook
+dispatch emits a matching `User` autocmd with inspectable `event.data`.
+
+  thread_opened          User AlmaThreadOpened
+  thread_changed         User AlmaThreadChanged
+  before_submit          User AlmaBeforeSubmit
+  request_compiled       User AlmaRequestCompiled
+  after_submit           User AlmaAfterSubmit
+  generation_completed   User AlmaGenerationCompleted
+  generation_error       User AlmaGenerationError
+  proposal_received      User AlmaProposalReceived
+
+>lua
+  local hooks = require("alma.hooks")
+  hooks.on("before_submit", function(event)
+    vim.print(event.thread_id)
+  end)
+<
+
+Context attachments~
+
+`require("alma.context")` stores file or JSON attachments by thread id with
+stable id-based dedupe. Pending attachments are appended to the next request's
+`ephemeralContext` after `before_submit` hooks and before request compilation.
+Inline JSON uses JSON context by default; set `inline = false`,
+`file_backed = true`, provide `path`, or set `max_inline_bytes` to use
+file-backed JSON context. Request metadata stores compact attachment
+labels/counts only. `context.consume(thread_id)` returns registered attachments
+and removes those marked `once = true` after a successful local submit dispatch.
+
+>lua
+  local context = require("alma.context")
+  context.attach("thread-id", {
+    type = "json",
+    id = "state",
+    data = { ready = true },
+    once = true,
+  })
+  local items = context.consume("thread-id")
+<
+
+Proposal-like events~
+
+Generic WebSocket payloads whose event name contains "proposal" are normalized
+to `proposal_received` with `id`, `thread_id`, `kind`, `title`,
+`base_snapshot_id`, `files`, and `raw` before `User AlmaProposalReceived`.
 
 Reliability~
 

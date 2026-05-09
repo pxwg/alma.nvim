@@ -36,6 +36,8 @@ local function request_user_block(request)
     local_only = true,
     metadata = request.spec.metadata,
     context_count = #(request.spec.ephemeral_context or {}),
+    attachment_count = request.spec.metadata and request.spec.metadata.attachment_count or nil,
+    attachment_labels = request.spec.metadata and request.spec.metadata.attachment_labels or nil,
   }, request_metadata.from_request(request))
 end
 
@@ -625,6 +627,15 @@ local function queue_request(thread, request, effects)
   table.insert(effects, { type = "render", thread_id = thread.id })
 end
 
+local function schedule_crew_refetch(thread, effects)
+  table.insert(effects, {
+    type = "start_timer",
+    thread_id = thread.id,
+    name = "crew_refetch_debounce",
+    delay = config.get().refetch_debounce_ms,
+  })
+end
+
 local function start_request(thread, request, effects)
   thread.generation = "submitted"
   thread.sync = "dirty"
@@ -643,6 +654,7 @@ local function start_request(thread, request, effects)
     name = "ack_timeout",
     delay = config.get().ack_timeout_ms,
   })
+  schedule_crew_refetch(thread, effects)
   table.insert(effects, { type = "render", thread_id = thread.id })
 end
 
@@ -651,6 +663,7 @@ local function finish_reconcile(thread, effects)
   thread.status_message = "Reconciling with Alma REST state..."
   table.insert(effects, { type = "stop_timer", thread_id = thread.id, name = "poll" })
   table.insert(effects, { type = "rest_fetch_messages", thread_id = thread.id })
+  schedule_crew_refetch(thread, effects)
   table.insert(effects, { type = "render", thread_id = thread.id })
 end
 
@@ -724,6 +737,7 @@ function M.reduce_thread(thread, event)
     if thread.sync ~= "clean" then
       table.insert(effects, { type = "rest_fetch_messages", thread_id = thread.id })
     end
+    table.insert(effects, { type = "rest_fetch_agent_crew", thread_id = thread.id })
     table.insert(effects, { type = "render", thread_id = thread.id })
   elseif event.type == "buffer_hidden" then
     thread.visibility = "hidden"
@@ -790,6 +804,15 @@ function M.reduce_thread(thread, event)
     table.insert(effects, { type = "stop_timer", thread_id = thread.id, name = "ack_timeout" })
     table.insert(effects, { type = "render", thread_id = thread.id })
     pop_queue_if_ready(thread, effects)
+  elseif event.type == "rest_agent_crew_loaded" then
+    thread.agent_crew = event.agent_crew or {}
+    thread.agent_crew_error = nil
+    thread.agent_crew_updated_at = util.now_ms()
+    table.insert(effects, { type = "render", thread_id = thread.id })
+  elseif event.type == "rest_agent_crew_error" then
+    thread.agent_crew_error = event.error
+    thread.agent_crew_updated_at = util.now_ms()
+    table.insert(effects, { type = "render", thread_id = thread.id })
   elseif event.type == "rest_error" then
     thread.sync = "stale"
     thread.last_error = event.error
@@ -860,6 +883,9 @@ function M.reduce_thread(thread, event)
         name = "refetch_debounce",
         delay = config.get().refetch_debounce_ms,
       })
+      if event.name == "subagent_message_added" or event.name == "subagent_message_completed" then
+        schedule_crew_refetch(thread, effects)
+      end
     elseif event.name == "text_delta" or event.name == "message_delta" or event.name == "reasoning-delta" then
       thread.generation = "streaming"
       local text_delta, reasoning_delta = stream_delta_chunks(event.data, event.name)
@@ -892,6 +918,9 @@ function M.reduce_thread(thread, event)
         name = "refetch_debounce",
         delay = config.get().refetch_debounce_ms,
       })
+      if event.name == "part_add" or event.name == "part_update" or event.name == "tool_output_set" then
+        schedule_crew_refetch(thread, effects)
+      end
     else
       table.insert(effects, { type = "render", thread_id = thread.id })
     end

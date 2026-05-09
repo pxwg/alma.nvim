@@ -8,6 +8,7 @@ local alma_subcommands = {
   toggle = true,
   float = true,
   sidebar = true,
+  crews = true,
 }
 
 local function current_thread_id()
@@ -32,6 +33,8 @@ function M.setup()
       alma.pick_thread()
     elseif subcommand == "open" then
       alma.open_thread(opts.fargs[2])
+    elseif subcommand == "crews" then
+      require("alma.ui.detail").open_agent_crews()
     else
       local thread_id = opts.fargs[2]
       alma[subcommand]({ thread_id = thread_id })
@@ -129,6 +132,10 @@ function M.setup()
   vim.api.nvim_create_user_command("AlmaToolDetails", function()
     require("alma.ui.detail").open_under_cursor()
   end, { desc = "Open detail buffer for Alma block under cursor" })
+
+  vim.api.nvim_create_user_command("AlmaAgentCrew", function()
+    require("alma.ui.detail").open_agent_crews()
+  end, { desc = "Open current Alma thread agent crew view" })
 
   vim.api.nvim_create_user_command("AlmaToggleBlock", function()
     require("alma.ui.render").toggle_under_cursor()

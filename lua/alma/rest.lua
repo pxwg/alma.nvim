@@ -150,6 +150,10 @@ function M.messages(thread_id, callback)
   M.get("/api/threads/" .. vim.uri_encode(thread_id) .. "/messages", callback)
 end
 
+function M.agent_crew(thread_id, callback)
+  M.get("/api/threads/" .. vim.uri_encode(thread_id) .. "/agent-crew", callback)
+end
+
 local catalog_paths = {
   models = { "/api/models", "/api/ai/models", "/api/config/models" },
   skills = { "/api/skills" },

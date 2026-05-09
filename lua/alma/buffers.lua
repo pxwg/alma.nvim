@@ -1,4 +1,6 @@
 local config = require("alma.config")
+local context = require("alma.context")
+local hooks = require("alma.hooks")
 local state = require("alma.state")
 local util = require("alma.util")
 
@@ -238,14 +240,55 @@ function M.submit_current(args)
     util.notify(warning, vim.log.levels.WARN)
   end
 
+  hooks.dispatch("before_submit", {
+    thread_id = thread.id,
+    thread = thread,
+    spec = spec,
+    lines = vim.deepcopy(lines),
+  })
+
+  local pending_attachments = context.list(thread.id)
+  for _, item in ipairs(context.to_ephemeral_context_list(pending_attachments)) do
+    table.insert(spec.ephemeral_context, item)
+  end
+  context.apply_compact_metadata(spec, pending_attachments)
+
   require("alma.ui.render").prepare_submit_follow(thread, vim.api.nvim_get_current_win())
 
+  local payload = parser.compile_request(thread, spec)
+  local attachment_parts, attachment_part_warnings = context.to_message_parts(pending_attachments)
+  for _, warning in ipairs(attachment_part_warnings or {}) do
+    util.notify("Alma attachment part skipped: " .. tostring(warning), vim.log.levels.WARN)
+  end
+  local user_parts = payload.data and payload.data.userMessage and payload.data.userMessage.parts
+  if type(user_parts) == "table" then
+    for _, part in ipairs(attachment_parts or {}) do
+      table.insert(user_parts, part)
+    end
+  end
   local request = {
     spec = spec,
-    payload = parser.compile_request(thread, spec),
+    payload = payload,
     created_at = util.now_ms(),
   }
+
+  hooks.dispatch("request_compiled", {
+    thread_id = thread.id,
+    thread = thread,
+    spec = spec,
+    request = request,
+    payload = payload,
+  })
+
   require("alma.effects").dispatch(thread.id, { type = "submit", request = request })
+  context.consume(thread.id)
+  hooks.dispatch("after_submit", {
+    thread_id = thread.id,
+    thread = thread,
+    spec = spec,
+    request = request,
+    payload = request.payload,
+  })
 end
 
 return M

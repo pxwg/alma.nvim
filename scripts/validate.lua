@@ -11,12 +11,15 @@ require("alma").setup({ notify = false })
 
 local parser = require("alma.parser")
 local core = require("alma.core")
+local hooks = require("alma.hooks")
+local context = require("alma.context")
 local events = require("alma.events")
 local state = require("alma.state")
 local ws = require("alma.ws")
 local config = require("alma.config")
 local rest = require("alma.rest")
 local render = require("alma.ui.render")
+local detail = require("alma.ui.detail")
 local request_metadata = require("alma.ui.metadata")
 local tokens = require("alma.ui.tokens")
 local tool_renderers = require("alma.ui.tool_renderers")
@@ -358,7 +361,7 @@ assert_eq(tokens.classify("$temp:0.25").value, 0.25, "token temp selector value"
 assert_eq(tokens.classify("$no-tools").selector, "no_tools", "token no-tools selector valid")
 assert_eq(tokens.classify("$temp:not-a-number").valid, false, "token invalid temp rejected")
 assert(has_label(tokens.static_for_trigger(">"), ">file:<path>"), "token static context includes file selector")
-assert(not has_label(tokens.static_for_trigger(">"), ">zk:<id>"), "token static context excludes zk selector")
+assert(not has_label(tokens.static_for_trigger(">"), ">custom:<id>"), "token static context excludes custom selector")
 
 assert_eq(tokens.classify("@ConfiguredTool", { tools = { "ConfiguredTool" } }).valid, true, "token configured tool valid")
 assert_eq(tokens.classify("@OtherTool", { tools = { "ConfiguredTool" } }).valid, false, "token unknown configured tool rejected")
@@ -369,6 +372,35 @@ assert_eq(tokens.classify("@group:default").valid, true, "token group form valid
 assert_eq(tokens.classify("@group:").valid, false, "token empty group rejected")
 
 local thread = state.get_thread("validate-thread", { cwd = root })
+;(function()
+local context_buf = vim.api.nvim_create_buf(false, true)
+vim.api.nvim_buf_set_name(context_buf, root .. "/validate-context.txt")
+vim.api.nvim_buf_set_lines(context_buf, 0, -1, false, { "alpha", "beta", "gamma" })
+vim.api.nvim_set_current_buf(context_buf)
+vim.fn.setpos("'<", { 0, 2, 1, 0 })
+vim.fn.setpos("'>", { 0, 3, 1, 0 })
+local parser_context_spec = parser.parse_input({
+  ">buffer",
+  ">selection",
+  ">diagnostics",
+  ">diff",
+  ">file:scripts/validate.lua",
+  "context prompt",
+}, thread)
+assert_eq(parser_context_spec.prompt, "context prompt", "parser context prompt")
+assert_eq(parser_context_spec.ephemeral_context[1].type, "buffer", "parser buffer context type")
+assert_eq(parser_context_spec.ephemeral_context[1].text, "alpha\nbeta\ngamma", "parser buffer context text")
+assert_eq(parser_context_spec.ephemeral_context[2].type, "selection", "parser selection context type")
+assert_eq(parser_context_spec.ephemeral_context[2].text, "beta\ngamma", "parser selection context text")
+assert_eq(parser_context_spec.ephemeral_context[3].type, "diagnostics", "parser diagnostics context type")
+assert_eq(parser_context_spec.ephemeral_context[4].type, "diff", "parser diff context type")
+assert_eq(parser_context_spec.ephemeral_context[5].type, "file", "parser file context type")
+assert_eq(
+  parser_context_spec.ephemeral_context[5].path,
+  vim.fn.fnamemodify("scripts/validate.lua", ":p"),
+  "parser file context path"
+)
+end)()
 local spec = parser.parse_input({
   "$model: test-model",
   "$reasoning:xhigh",
@@ -386,10 +418,10 @@ assert_eq(spec.metadata.reasoningEffort, "xhigh", "parser reasoning metadata")
 assert_eq(spec.tools[1], "Bash", "parser tool")
 assert_eq(spec.ephemeral_context[1].type, "diagnostics", "parser context")
 assert_eq(spec.metadata.source, "alma_nvim", "parser metadata source is API-safe")
-local zk_spec = parser.parse_input({ ">zk:2605060150", "hello zk" }, thread)
-assert_eq(zk_spec.prompt, ">zk:2605060150\nhello zk", "parser keeps zk token in prompt")
-assert_eq(#zk_spec.ephemeral_context, 0, "parser does not create zk context")
-assert(zk_spec.warnings[1]:find("Unknown Alma token", 1, true), "parser warns about zk token")
+local custom_spec = parser.parse_input({ ">custom-context:example", "hello custom" }, thread)
+assert_eq(custom_spec.prompt, ">custom-context:example\nhello custom", "parser keeps unknown context token in prompt")
+assert_eq(#custom_spec.ephemeral_context, 0, "parser does not create unknown context")
+assert(custom_spec.warnings[1]:find("Unknown Alma token", 1, true), "parser warns about unknown context token")
 
 local payload = parser.compile_request(thread, spec)
 local current_request_metadata = request_metadata.from_request({ spec = spec, payload = payload })
@@ -543,12 +575,326 @@ local explicit_spec = parser.parse_input({ "@Bash", "/skill:test-skill", "hello 
 assert_eq(explicit_spec.tools[1], "Bash", "explicit tool overrides auto tools sentinel")
 assert_eq(explicit_spec.skills[1], "test-skill", "explicit skill overrides auto skills sentinel")
 
+;(function()
+local expected_hooks = {
+  thread_opened = "AlmaThreadOpened",
+  thread_changed = "AlmaThreadChanged",
+  before_submit = "AlmaBeforeSubmit",
+  request_compiled = "AlmaRequestCompiled",
+  after_submit = "AlmaAfterSubmit",
+  generation_completed = "AlmaGenerationCompleted",
+  generation_error = "AlmaGenerationError",
+  proposal_received = "AlmaProposalReceived",
+}
+local hook_names = hooks.names()
+assert_eq(#hook_names, 8, "hook registry exposes expected hook count")
+assert_eq(hooks.register, hooks.on, "hook registry exposes register alias")
+assert_eq(hooks.unregister, hooks.off, "hook registry exposes unregister alias")
+local hook_group = vim.api.nvim_create_augroup("alma_validate_hooks", { clear = true })
+for name, autocmd in pairs(expected_hooks) do
+  assert_eq(hooks.autocmd_name(name), autocmd, "hook autocmd name " .. name)
+  hooks.clear(name)
+  local callback_seen = false
+  local autocmd_seen = false
+  hooks.on(name, function()
+    error("intentional hook failure")
+  end)
+  hooks.on(name, function(event)
+    callback_seen = event.hook == name and event.thread_id == "validate-hook-thread"
+  end)
+  vim.api.nvim_create_autocmd("User", {
+    group = hook_group,
+    pattern = autocmd,
+    callback = function(event)
+      autocmd_seen = event.data and event.data.hook == name and event.data.thread_id == "validate-hook-thread"
+    end,
+  })
+  local result = hooks.dispatch(name, { thread_id = "validate-hook-thread" })
+  assert_eq(result.ok, false, "hook failure is reported " .. name)
+  assert(callback_seen, "hook callback after failure ran " .. name)
+  assert(autocmd_seen, "hook autocmd fired " .. name)
+end
+hooks.clear()
+vim.api.nvim_clear_autocmds({ group = hook_group })
+
+;(function()
+context.clear()
+local file_attachment = context.attach("validate-context-thread", {
+  type = "file",
+  id = "stable-file",
+  path = "scripts/validate.lua",
+  label = "validation file",
+  once = true,
+})
+assert_eq(file_attachment.id, "stable-file", "context file attachment id")
+assert_eq(file_attachment.type, "file", "context file attachment type")
+context.attach("validate-context-thread", {
+  kind = "application/json",
+  id = "stable-json",
+  content = { version = 1, value = "before" },
+  once = true,
+})
+context.attach("validate-context-thread", {
+  type = "json",
+  id = "stable-json",
+  data = { version = 1, value = "after" },
+  once = true,
+})
+local listed_context = context.list("validate-context-thread")
+assert_eq(#listed_context, 2, "context attachments dedupe by stable id")
+assert_eq(listed_context[2].data.value, "after", "context dedupe replaces attachment")
+listed_context[2].data.value = "mutated copy"
+assert_eq(context.list("validate-context-thread")[2].data.value, "after", "context list returns copies")
+local json_request_context = context.to_ephemeral_context(context.list("validate-context-thread")[2])
+assert_eq(json_request_context.type, "json", "context converts json attachment type")
+assert_eq(json_request_context.title, "stable-json", "context converts json attachment title")
+assert_eq(json_request_context.data.value, "after", "context converts json attachment data")
+context.attach("validate-context-thread", {
+  type = "json",
+  id = "file-backed-json",
+  title = "File Backed JSON",
+  data = { secret = "file-backed-secret", value = 2 },
+  inline = false,
+  once = true,
+})
+local file_backed_context = context.to_ephemeral_context(context.list("validate-context-thread")[3])
+assert_eq(file_backed_context.type, "file", "context falls back json attachment to file context")
+assert_eq(file_backed_context.mediaType, "application/json", "file-backed json keeps media type")
+assert_eq(file_backed_context.metadata.attachmentType, "json", "file-backed json keeps attachment type metadata")
+assert_eq(file_backed_context.metadata.fileBacked, true, "file-backed json records file backing")
+assert(file_backed_context.path and file_backed_context.path:match("%.json$"), "file-backed json writes json file")
+local file_backed_text = table.concat(vim.fn.readfile(file_backed_context.path), "\n")
+assert(file_backed_text:find("file%-backed%-secret"), "file-backed json writes payload to file")
+local compact_context = context.compact_metadata(context.list("validate-context-thread"))
+assert_eq(compact_context.count, 3, "context compact metadata counts attachments")
+assert_eq(compact_context.labels[3], "File Backed JSON", "context compact metadata keeps label")
+assert(not vim.inspect(compact_context):find("file%-backed%-secret"), "context compact metadata omits raw json")
+local consumed_context = context.consume("validate-context-thread")
+assert_eq(#consumed_context, 3, "context consume returns attachments")
+assert_eq(#context.list("validate-context-thread"), 0, "context consume removes once attachments")
+context.attach("validate-context-thread", {
+  type = "json",
+  id = "persistent-json",
+  data = { value = "keep" },
+})
+context.attach("other-context-thread", {
+  type = "json",
+  id = "other-json",
+  data = { value = "other" },
+  once = true,
+})
+assert_eq(#context.consume("validate-context-thread"), 1, "context consume includes persistent attachment")
+assert_eq(#context.list("validate-context-thread"), 1, "context consume keeps persistent attachment")
+assert_eq(#context.list("other-context-thread"), 1, "context registry is thread scoped")
+context.clear()
+end)()
+
+local hooks_source = table.concat(vim.fn.readfile(root .. "/lua/alma/hooks.lua"), "\n")
+local context_source = table.concat(vim.fn.readfile(root .. "/lua/alma/context.lua"), "\n")
+local domain_terms = {
+  string.char(90, 75),
+  string.char(84, 121, 112, 115, 116),
+  string.char(119, 105, 107, 105),
+  string.char(122, 107, 45, 108, 115, 112),
+}
+for _, forbidden in ipairs(domain_terms) do
+  assert(not hooks_source:find(forbidden, 1, true), "hooks module excludes domain term " .. forbidden)
+  assert(not context_source:find(forbidden, 1, true), "context module excludes domain term " .. forbidden)
+end
+
+local submit_thread = state.get_thread("validate-submit-hook-thread", { cwd = root })
+local submit_buf = vim.api.nvim_create_buf(false, true)
+state.bind_buffer(submit_thread, submit_buf)
+submit_thread.prompt_start = 1
+vim.api.nvim_buf_set_lines(submit_buf, 0, -1, false, { "## You", "submit through failing hook" })
+vim.api.nvim_set_current_buf(submit_buf)
+local effects = require("alma.effects")
+local original_dispatch = effects.dispatch
+local captured_submit
+effects.dispatch = function(thread_id, event)
+  captured_submit = { thread_id = thread_id, event = event }
+end
+local submit_seen = { context_counts = {} }
+context.clear()
+context.attach("validate-submit-hook-thread", {
+  type = "json",
+  id = "pre-submit-json",
+  label = "Pre Submit JSON",
+  data = { value = "registered before submit" },
+  once = true,
+})
+context.attach("validate-submit-hook-thread", {
+  type = "json",
+  id = "pre-submit-file-json",
+  title = "Pre Submit File JSON",
+  data = { value = "registered before submit as file" },
+  inline = false,
+  once = true,
+})
+hooks.on("before_submit", function()
+  error("intentional submit hook failure")
+end)
+hooks.on("before_submit", function(event)
+  context.attach(event.thread_id, {
+    kind = "application/json",
+    title = "hook-json",
+    content = { value = "registered in hook" },
+    once = true,
+  })
+  context.attach(event.thread_id, {
+    type = "file",
+    id = "persistent-submit-file",
+    path = "scripts/validate.lua",
+  })
+end)
+hooks.on("request_compiled", function(event)
+  submit_seen.compiled = true
+  event.payload.data.userMessageMetadata.hookValidated = true
+  table.insert(submit_seen.context_counts, #(event.payload.data.ephemeralContext or {}))
+end)
+hooks.on("after_submit", function(event)
+  submit_seen.after = event.payload.data.userMessageMetadata.hookValidated == true
+end)
+require("alma.buffers").submit_current()
+effects.dispatch = original_dispatch
+hooks.clear()
+assert(captured_submit, "submit dispatch continues after failing hook")
+assert_eq(captured_submit.thread_id, "validate-submit-hook-thread", "submit hook dispatch thread id")
+assert_eq(captured_submit.event.type, "submit", "submit hook dispatch event type")
+assert(submit_seen.compiled, "request_compiled hook ran during submit")
+assert(submit_seen.after, "after_submit hook sees compiled request mutation")
+local submitted_context = captured_submit.event.request.payload.data.ephemeralContext or {}
+assert_eq(#submitted_context, 4, "submit injects registered context attachments")
+assert_eq(submit_seen.context_counts[1], 4, "request_compiled sees injected context attachments")
+assert_eq(submitted_context[1].type, "json", "submit injects pre-registered json attachment")
+assert_eq(submitted_context[1].data.value, "registered before submit", "submit preserves json attachment data")
+assert_eq(submitted_context[2].type, "file", "submit falls back pre-registered json attachment to file")
+assert_eq(submitted_context[2].mediaType, "application/json", "submit file-backed json keeps media type")
+assert_eq(submitted_context[3].type, "json", "submit injects hook-registered json attachment")
+assert_eq(submitted_context[3].title, "hook-json", "submit uses hook attachment title")
+assert_eq(submitted_context[4].type, "file", "submit injects file attachment")
+assert_eq(captured_submit.event.request.spec.prompt, "submit through failing hook", "submit attachments do not change spec prompt")
+assert_eq(
+  captured_submit.event.request.payload.data.userMessage.parts[1].text,
+  "submit through failing hook",
+  "submit attachments do not change payload prompt"
+)
+assert_eq(
+  captured_submit.event.request.payload.data.userMessageMetadata.attachment_count,
+  4,
+  "submit stores compact attachment count metadata"
+)
+assert_eq(
+  captured_submit.event.request.payload.data.userMessageMetadata.attachment_labels[1],
+  "Pre Submit JSON",
+  "submit stores compact attachment labels"
+)
+assert(
+  not vim.inspect(captured_submit.event.request.payload.data.userMessageMetadata):find("registered before submit", 1, true),
+  "submit compact metadata omits raw json payload"
+)
+local _, submit_reduce_effects = core.reduce_thread(submit_thread, captured_submit.event)
+assert_eq(submit_thread.local_blocks[1].text, "submit through failing hook", "submit user block prompt unchanged")
+assert_eq(submit_thread.local_blocks[1].attachment_count, 4, "submit user block stores compact attachment count")
+local submit_labels = request_metadata.user_labels(submit_thread, submit_thread.local_blocks[1])
+assert(vim.tbl_contains(submit_labels, "Pre Submit JSON"), "submit user labels include compact attachment label")
+assert(vim.tbl_contains(submit_labels, "Pre Submit File JSON"), "submit user labels include second compact attachment label")
+local submit_effect_has_ws = false
+for _, effect in ipairs(submit_reduce_effects) do
+  submit_effect_has_ws = submit_effect_has_ws or effect.type == "ws_send"
+end
+assert(submit_effect_has_ws, "submit reduce still sends websocket payload")
+assert_eq(#context.list("validate-submit-hook-thread"), 1, "submit consumes only once attachments")
+assert_eq(context.list("validate-submit-hook-thread")[1].id, "persistent-submit-file", "submit keeps persistent attachment")
+context.clear()
+end)()
+
+;(function()
+local once_thread = state.get_thread("validate-once-submit-thread", { cwd = root })
+local once_buf = vim.api.nvim_create_buf(false, true)
+state.bind_buffer(once_thread, once_buf)
+once_thread.prompt_start = 1
+vim.api.nvim_buf_set_lines(once_buf, 0, -1, false, { "## You", "repeat submit" })
+vim.api.nvim_set_current_buf(once_buf)
+local effects = require("alma.effects")
+local original_dispatch = effects.dispatch
+local captures = {}
+effects.dispatch = function(thread_id, event)
+  table.insert(captures, { thread_id = thread_id, event = event })
+end
+context.clear()
+context.attach("validate-once-submit-thread", {
+  type = "json",
+  id = "once-json",
+  label = "Once JSON",
+  data = { value = "consume me once" },
+  once = true,
+})
+context.attach("validate-once-submit-thread", {
+  type = "file",
+  id = "persistent-json-file",
+  path = "scripts/validate.lua",
+})
+require("alma.buffers").submit_current()
+require("alma.buffers").submit_current()
+effects.dispatch = original_dispatch
+hooks.clear()
+assert_eq(#captures, 2, "once attachment validation captured two submits")
+local first_context = captures[1].event.request.payload.data.ephemeralContext or {}
+local second_context = captures[2].event.request.payload.data.ephemeralContext or {}
+assert_eq(#first_context, 2, "first repeat submit includes once and persistent attachments")
+assert_eq(first_context[1].id, "once-json", "first repeat submit includes once attachment")
+assert_eq(#second_context, 1, "second repeat submit excludes consumed once attachment")
+assert_eq(second_context[1].id, "persistent-json-file", "second repeat submit keeps persistent attachment only")
+assert_eq(captures[2].event.request.payload.data.userMessage.parts[1].text, "repeat submit", "repeat submit prompt unchanged")
+context.clear()
+end)()
+
 local normalized = events.normalize_ws_event({
   type = "text_delta",
   data = { threadId = "validate-thread", delta = "ok" },
 })
 assert_eq(normalized.thread_id, "validate-thread", "ws event thread id")
 assert_eq(normalized.known, true, "ws event known")
+;(function()
+local proposal_event = events.normalize_ws_event({
+  type = "generic_proposal_created",
+  payload = {
+    proposal = {
+      id = "proposal-alpha",
+      threadId = "validate-proposal-thread",
+      title = "Review changes",
+      baseSnapshotId = "snapshot-alpha",
+      files = {
+        {
+          relativePath = "note/example.typ",
+          patch = "@@ -1 +1 @@\n-old\n+new",
+          hunks = { { oldStart = 1, newStart = 1 } },
+        },
+      },
+    },
+  },
+})
+assert_eq(proposal_event.name, "proposal_received", "proposal-like event normalizes to proposal_received")
+assert_eq(proposal_event.thread_id, "validate-proposal-thread", "proposal-like event thread id")
+assert_eq(proposal_event.known, true, "proposal-like event is known after normalization")
+assert_eq(proposal_event.data.id, "proposal-alpha", "proposal-like event keeps id")
+assert_eq(proposal_event.data.kind, "diff", "proposal-like event infers diff kind")
+assert_eq(proposal_event.data.title, "Review changes", "proposal-like event keeps title")
+assert_eq(proposal_event.data.base_snapshot_id, "snapshot-alpha", "proposal-like event keeps base snapshot")
+assert_eq(proposal_event.data.files[1].relative_path, "note/example.typ", "proposal-like event keeps file path")
+assert_eq(proposal_event.data.files[1].diff, "@@ -1 +1 @@\n-old\n+new", "proposal-like event keeps diff")
+state.get_thread("validate-proposal-thread", { cwd = root })
+local proposal_seen
+hooks.on("proposal_received", function(event)
+  proposal_seen = event.proposal
+end)
+require("alma.effects").dispatch("validate-proposal-thread", proposal_event)
+hooks.clear()
+assert(proposal_seen, "proposal_received hook dispatched normalized proposal")
+assert_eq(proposal_seen.id, "proposal-alpha", "proposal_received hook sees proposal id")
+assert_eq(proposal_seen.files[1].relative_path, "note/example.typ", "proposal_received hook sees generic files")
+end)()
 
 local thread_generating = events.normalize_ws_event({
   type = "thread_generating",
@@ -1014,6 +1360,49 @@ core.reduce_thread(thread, {
 assert_eq(thread.local_blocks[1].state, "done", "subagent completed marks text block done")
 assert_eq(thread.local_blocks[2].state, "output-available", "subagent completed updates tool state")
 assert_eq(thread.local_blocks[2].output, "done", "subagent completed updates tool output")
+local crew_lines = detail.agent_crew_lines(thread)
+local crew_text = table.concat(crew_lines, "\n")
+assert(vim.tbl_contains(crew_lines, "## Live Task Activity"), "local crew fallback shows task activity")
+assert(crew_text:find("✓ Developer %[done%]") or crew_text:find("✓ Developer [done]", 1, true), "local crew fallback shows task status")
+assert(crew_text:find("tools: Bash %[output%-available%]") or crew_text:find("tools: Bash [output-available]", 1, true), "local crew fallback shows tool summary")
+assert(not crew_text:find("delegated output", 1, true), "local crew fallback hides delegated text content")
+local api_crew_lines = detail.agent_crew_lines({
+  missions = {
+    {
+      id = "mission-one",
+      title = "Build complete app",
+      status = "running",
+      harnessMode = "sprint-harness",
+      currentPhase = "generating",
+      summary = { totalRuns = 2, completedRuns = 1, activeRuns = 1 },
+      sprints = {
+        { id = "sprint-one", sprintNumber = 1, title = "Foundation", status = "passed", agentId = "developer" },
+        { id = "sprint-two", sprintNumber = 2, title = "Crew progress view", status = "active", agentId = "developer" },
+      },
+      contracts = {
+        {
+          id = "contract-two",
+          sprintId = "sprint-two",
+          status = "agreed",
+          criteria = { { id = "c1", description = "Shows the current sprint without exposing the agent implementation." } },
+        },
+      },
+      evaluations = {},
+      handoffs = {},
+      runs = {},
+    },
+  },
+}, { thread = { title = "Crew thread" } })
+local api_crew_text = table.concat(api_crew_lines, "\n")
+assert(api_crew_text:find("Crew · 1 missions, 2 runs, 1 active", 1, true), "agent crew API view shows totals")
+assert(api_crew_text:find("mode: Sprint Harness", 1, true), "agent crew API view mirrors harness mode")
+assert(api_crew_text:find("phase: Building", 1, true), "agent crew API view shows phase label")
+assert(api_crew_text:find("progress: 1/2 sprints", 1, true), "agent crew API view shows sprint progress")
+assert(api_crew_text:find("current: Building: S2 Crew progress view", 1, true), "agent crew API view highlights current step")
+assert(api_crew_text:find("● S2 Crew progress view %[active%]") or api_crew_text:find("● S2 Crew progress view [active]", 1, true), "agent crew API view renders active sprint")
+assert(api_crew_text:find("Contract", 1, true), "agent crew API view expands active contract")
+assert(api_crew_text:find("c1 Shows the current sprint", 1, true), "agent crew API view shows acceptance criteria")
+assert(not api_crew_text:find("developer", 1, true), "agent crew API view hides agent implementation details")
 thread.subagent_streams = {}
 thread.subagent_order = {}
 thread.local_blocks = {}
@@ -1230,6 +1619,37 @@ assert_header_contains(
   "composer header real context remaining"
 )
 
+local crew_progress_thread = state.get_thread("validate-crew-progress-thread", { cwd = root })
+local crew_progress_bufnr = vim.api.nvim_create_buf(false, true)
+state.bind_buffer(crew_progress_thread, crew_progress_bufnr)
+crew_progress_thread.blocks = {}
+crew_progress_thread.local_blocks = {}
+crew_progress_thread.pending_request = nil
+crew_progress_thread.generation = "idle"
+crew_progress_thread.agent_crew = {
+  missions = {
+    {
+      title = "Build task tree",
+      status = "running",
+      harnessMode = "sprint-harness",
+      currentPhase = "generating",
+      sprints = {
+        { id = "crew-s1", sprintNumber = 1, title = "Foundation", status = "passed" },
+        { id = "crew-s2", sprintNumber = 2, title = "Progress extmark", status = "active" },
+      },
+      summary = { totalRuns = 2, completedRuns = 1, activeRuns = 1 },
+    },
+  },
+}
+render.render(crew_progress_thread)
+local crew_progress_lines = placeholder_virt_lines_text(crew_progress_bufnr, render_ns, crew_progress_thread.prompt_start + 1)
+local crew_progress_text = table.concat(crew_progress_lines, "\n")
+assert(crew_progress_text:find("Build task tree", 1, true), "crew progress extmark shows mission title")
+assert(crew_progress_text:find("1/2", 1, true), "crew progress extmark shows sprint progress")
+assert(crew_progress_text:find("Building: S2 Progress extmark", 1, true), "crew progress extmark shows current step")
+assert(not vim.tbl_contains(vim.api.nvim_buf_get_lines(crew_progress_bufnr, 0, -1, false), "Build task tree"), "crew progress is virtual only")
+assert(next(vim.api.nvim_get_hl(0, { name = "AlmaCrewProgressActive", link = true })) ~= nil, "crew progress active highlight is defined")
+
 local stream_thread = state.get_thread("validate-stream-decoration-thread", { cwd = root })
 local stream_bufnr = vim.api.nvim_create_buf(false, true)
 state.bind_buffer(stream_thread, stream_bufnr)
@@ -1275,6 +1695,19 @@ local subagent_event_block = {
   event_type = "subagent_message_delta",
   text = "delegated event output",
 }
+local persisted_subagent_task_block = {
+  type = "AssistantBlock",
+  message_id = "stream-subagent-task",
+  metadata = { subagentTaskId = "task-persisted-alpha", subagentParentMessageId = "msg-parent-alpha" },
+  text = "persisted subagent assistant output",
+}
+local persisted_subagent_reasoning_block = {
+  type = "ReasoningBlock",
+  message_id = "stream-subagent-task",
+  metadata = { subagentTaskId = "task-persisted-alpha", subagentParentMessageId = "msg-parent-alpha" },
+  text = "persisted subagent reasoning output",
+  state = "done",
+}
 stream_thread.blocks = {
   primary_assistant_block,
   tool_decoration_block,
@@ -1283,6 +1716,8 @@ stream_thread.blocks = {
   raw_decoration_block,
   subagent_metadata_block,
   subagent_event_block,
+  persisted_subagent_task_block,
+  persisted_subagent_reasoning_block,
 }
 stream_thread.local_blocks = {}
 stream_thread.pending_request = nil
@@ -1309,24 +1744,18 @@ assert_stream_decoration(
   "timeline block gutter"
 )
 assert_stream_decoration(stream_thread, stream_marks, raw_decoration_block, "AlmaStreamRaw", "raw event block gutter")
-assert_stream_decoration(
-  stream_thread,
-  stream_marks,
-  subagent_metadata_block,
-  "AlmaStreamSubAgent",
-  "subagent metadata block gutter"
-)
-assert_stream_decoration(
-  stream_thread,
-  stream_marks,
-  subagent_event_block,
-  "AlmaStreamSubAgent",
-  "subagent event block gutter"
-)
+assert_no_stream_decoration(stream_thread, stream_marks, subagent_metadata_block, "subagent metadata title-only block")
+assert_no_stream_decoration(stream_thread, stream_marks, subagent_event_block, "subagent event title-only block")
+assert_no_stream_decoration(stream_thread, stream_marks, persisted_subagent_task_block, "persisted subagent task title-only block")
+assert_no_stream_decoration(stream_thread, stream_marks, persisted_subagent_reasoning_block, "persisted subagent reasoning title-only block")
 assert_no_stream_decoration(stream_thread, stream_marks, primary_assistant_block, "primary assistant gutter")
 local persisted_stream_lines = vim.api.nvim_buf_get_lines(stream_bufnr, 0, -1, false)
 assert(vim.tbl_contains(persisted_stream_lines, "## Alma researcher"), "subagent metadata block uses source header")
 assert(vim.tbl_contains(persisted_stream_lines, "## Alma Subagent"), "subagent event block uses fallback source header")
+assert(not vim.tbl_contains(persisted_stream_lines, "persisted subagent assistant output"), "persisted subagent assistant content is hidden inline")
+assert(not vim.tbl_contains(persisted_stream_lines, "persisted subagent reasoning output"), "persisted subagent reasoning content is hidden inline")
+assert(not vim.tbl_contains(persisted_stream_lines, "delegated worker output"), "subagent metadata content is hidden inline")
+assert(not vim.tbl_contains(persisted_stream_lines, "delegated event output"), "subagent event content is hidden inline")
 for _, line in ipairs(persisted_stream_lines) do
   assert(not line:find("▌", 1, true), "tool gutter marker is virtual only")
   assert(not line:find("▎", 1, true), "timeline gutter marker is virtual only")

@@ -55,6 +55,36 @@ local function first_number(...)
   return nil
 end
 
+local function attachment_meta(block)
+  if type(block) ~= "table" then
+    return {}
+  end
+  local source = block
+  local meta = type(block.metadata) == "table" and block.metadata or {}
+  local count = first_number(source.attachment_count, source.attachmentCount, meta.attachment_count, meta.attachmentCount)
+  if not count or count <= 0 then
+    return {}
+  end
+  local labels = source.attachment_labels or source.attachmentLabels or meta.attachment_labels or meta.attachmentLabels
+  local out = {}
+  if type(labels) == "table" then
+    local limit = math.min(#labels, 2)
+    for index = 1, limit do
+      local label = normalize(labels[index])
+      if label then
+        table.insert(out, label)
+      end
+    end
+  end
+  local remaining = count - #out
+  if remaining > 0 then
+    table.insert(out, tostring(remaining) .. (remaining == 1 and " attachment" or " attachments"))
+  elseif count == 1 and #out == 0 then
+    table.insert(out, "1 attachment")
+  end
+  return out
+end
+
 function M.model_label(value)
   value = normalize(value)
   if not value then
@@ -217,7 +247,9 @@ function M.user_labels(thread, block, request)
     request = request,
     include_current_request = false,
   })
-  return M.request_labels(request_metadata)
+  local labels = M.request_labels(request_metadata)
+  util.list_extend(labels, attachment_meta(block))
+  return labels
 end
 
 function M.assistant_labels(thread, block, request)

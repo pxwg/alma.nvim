@@ -1,5 +1,6 @@
 local buffers = require("alma.buffers")
 local config = require("alma.config")
+local hooks = require("alma.hooks")
 local state = require("alma.state")
 
 local M = {}
@@ -97,9 +98,16 @@ local function focus_composer(thread, win)
   vim.api.nvim_win_set_cursor(win, { lnum, 0 })
 end
 
-local function render_and_focus(thread, win)
+local function render_and_focus(thread, win, layout)
   require("alma.ui.render").render(thread)
   focus_composer(thread, win)
+  hooks.dispatch("thread_opened", {
+    thread_id = thread.id,
+    thread = thread,
+    bufnr = thread.bufnr,
+    win = win,
+    layout = layout,
+  })
   return thread, win
 end
 
@@ -146,7 +154,7 @@ function M.float(opts)
   local win = win_state.float_win
   if valid_win(win, thread.bufnr) then
     vim.api.nvim_set_current_win(win)
-    return render_and_focus(thread, win)
+    return render_and_focus(thread, win, "float")
   end
 
   win = vim.api.nvim_open_win(thread.bufnr, true, float_config(opts))
@@ -154,7 +162,7 @@ function M.float(opts)
   win_state.last_layout = "float"
   vim.wo[win].winfixwidth = true
   vim.wo[win].winfixheight = true
-  return render_and_focus(thread, win)
+  return render_and_focus(thread, win, "float")
 end
 
 function M.sidebar(opts)
@@ -165,7 +173,7 @@ function M.sidebar(opts)
   if valid_win(win, thread.bufnr) then
     vim.api.nvim_set_current_win(win)
     pcall(vim.api.nvim_win_set_width, win, sidebar_width(opts))
-    return render_and_focus(thread, win)
+    return render_and_focus(thread, win, "sidebar")
   end
 
   focus_normal_window()
@@ -176,7 +184,7 @@ function M.sidebar(opts)
   win_state.sidebar_win = win
   win_state.last_layout = "sidebar"
   vim.wo[win].winfixwidth = true
-  return render_and_focus(thread, win)
+  return render_and_focus(thread, win, "sidebar")
 end
 
 function M.open(opts)

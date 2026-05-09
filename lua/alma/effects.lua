@@ -1,6 +1,7 @@
 local config = require("alma.config")
 local core = require("alma.core")
 local events = require("alma.events")
+local hooks = require("alma.hooks")
 local rest = require("alma.rest")
 local state = require("alma.state")
 local util = require("alma.util")
@@ -21,6 +22,35 @@ local function dispatch(thread_id, event)
     return
   end
   local _, effects = core.reduce_thread(thread, event)
+  hooks.dispatch("thread_changed", {
+    thread_id = thread.id,
+    thread = thread,
+    event = event,
+    effects = effects,
+  })
+  if event and event.type == "ws_event" and event.name == "generation_completed" then
+    hooks.dispatch("generation_completed", {
+      thread_id = thread.id,
+      thread = thread,
+      event = event,
+      data = event.data,
+    })
+  elseif event and event.type == "ws_event" and event.name == "generation_error" then
+    hooks.dispatch("generation_error", {
+      thread_id = thread.id,
+      thread = thread,
+      event = event,
+      data = event.data,
+      error = event.data and (event.data.error or event.data.message) or nil,
+    })
+  elseif event and event.type == "ws_event" and event.name == "proposal_received" then
+    hooks.dispatch("proposal_received", {
+      thread_id = thread.id,
+      thread = thread,
+      event = event,
+      proposal = event.data,
+    })
+  end
   M.run(effects)
 end
 
@@ -114,6 +144,8 @@ local function start_timer(thread_id, name, delay)
         dispatch(thread_id, { type = "poll_tick" })
       elseif name == "refetch_debounce" then
         M.run({ { type = "rest_fetch_messages", thread_id = thread_id } })
+      elseif name == "crew_refetch_debounce" then
+        M.run({ { type = "rest_fetch_agent_crew", thread_id = thread_id } })
       end
     end)
   end)
@@ -136,6 +168,14 @@ local function run_one(effect)
         dispatch(effect.thread_id, { type = "rest_messages_loaded", messages = data })
       else
         dispatch(effect.thread_id, { type = "rest_error", error = err })
+      end
+    end)
+  elseif effect.type == "rest_fetch_agent_crew" then
+    rest.agent_crew(effect.thread_id, function(data, err)
+      if data then
+        dispatch(effect.thread_id, { type = "rest_agent_crew_loaded", agent_crew = data })
+      else
+        dispatch(effect.thread_id, { type = "rest_agent_crew_error", error = err })
       end
     end)
   elseif effect.type == "start_timer" then
@@ -172,6 +212,7 @@ function M.refresh(thread_id)
   M.run({
     { type = "rest_fetch_thread", thread_id = thread_id },
     { type = "rest_fetch_messages", thread_id = thread_id },
+    { type = "rest_fetch_agent_crew", thread_id = thread_id },
   })
 end
 

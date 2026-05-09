@@ -79,8 +79,9 @@ luarocks make alma.nvim-scm-1.rockspec
   `snacks.picker` navigation.
 - `:AlmaModels`, `:AlmaTools`, `:AlmaSkills`, `:AlmaMCPServers` update
   thread-local request defaults.
-- `:AlmaToolDetails`, `:AlmaToggleBlock`, `:AlmaQuickfix`, `:AlmaBlockQuickfix`,
-  `:AlmaDiff` inspect, expand, or route tool output, file locations, and patch-like output.
+- `:AlmaToolDetails`, `:AlmaAgentCrew`, `:AlmaToggleBlock`, `:AlmaQuickfix`,
+  `:AlmaBlockQuickfix`, `:AlmaDiff` inspect, expand, or route tool output,
+  native crew timelines, file locations, and patch-like output.
 
 ## blink.cmp
 
@@ -141,18 +142,104 @@ Markdown images like `![alt](./image.png)`, `![alt](/abs/image.png)`,
 `![alt](file:///abs/image.png)`, `![alt](https://...)`, and data URI images are
 sent as Alma file parts while the original markdown stays visible locally.
 
+## Extension Hooks
+
+`require("alma.hooks")` provides a generic hook registry. Register callbacks with
+`hooks.on(name, callback)` or `hooks.register(name, callback)`; callbacks receive
+one event table and are isolated with `pcall`, so one failing callback does not
+stop later callbacks or the submit flow. Each dispatch also emits a matching
+`User` autocmd whose `event.data` contains the same inspectable table.
+
+Supported hooks and autocmds:
+
+- `thread_opened` -> `User AlmaThreadOpened`
+- `thread_changed` -> `User AlmaThreadChanged`
+- `before_submit` -> `User AlmaBeforeSubmit`
+- `request_compiled` -> `User AlmaRequestCompiled`
+- `after_submit` -> `User AlmaAfterSubmit`
+- `generation_completed` -> `User AlmaGenerationCompleted`
+- `generation_error` -> `User AlmaGenerationError`
+- `proposal_received` -> `User AlmaProposalReceived`
+
+```lua
+local hooks = require("alma.hooks")
+
+hooks.on("before_submit", function(event)
+  -- event.thread_id, event.thread, and event.spec are available here.
+end)
+
+vim.api.nvim_create_autocmd("User", {
+  pattern = "AlmaGenerationCompleted",
+  callback = function(event)
+    vim.print(event.data.thread_id)
+  end,
+})
+```
+
+## Context Attachments
+
+`require("alma.context")` stores thread-scoped file or JSON attachments with
+stable id-based dedupe. Pending attachments are appended to the next request's
+`ephemeralContext` after `before_submit` hooks and before request compilation.
+Inline JSON is sent as JSON context by default; set `inline = false`,
+`file_backed = true`, provide `path`, or set `max_inline_bytes` to use a
+file-backed JSON context. Submitted requests carry compact attachment metadata
+labels/counts, not raw JSON content. `once = true` attachments are removed only
+after the local submit dispatch succeeds, while persistent attachments remain
+registered.
+
+```lua
+local context = require("alma.context")
+
+context.attach("thread-id", {
+  type = "file",
+  id = "build-log",
+  path = "/tmp/build.log",
+  label = "Build log",
+  once = true,
+})
+
+context.attach("thread-id", {
+  type = "json",
+  id = "review-state",
+  title = "Review state",
+  content = { pending = 2 },
+})
+
+context.attach("thread-id", {
+  type = "json",
+  id = "review-snapshot",
+  title = "Review snapshot",
+  content = { files = 3 },
+  inline = false,
+  once = true,
+})
+
+local pending = context.list("thread-id")
+local consumed = context.consume("thread-id")
+```
+
+Proposal-like WebSocket events with generic `proposal`/`files`/`diff` payloads
+are normalized to the `proposal_received` hook shape before dispatching
+`User AlmaProposalReceived`.
+
 ## Tool Output Rendering
 
 Alma buffers use the dedicated `alma` filetype while registering markdown and
 `markdown_inline` Tree-sitter services. If Tree-sitter is unavailable, they fall
 back to legacy markdown syntax; otherwise they avoid stacking both highlighters.
 They persist only chat text plus one-line placeholders for reasoning, tool
-calls, raw events, agent timeline events, and subagent streams. Subagent output
-is rendered as its own `Alma Subagent` source when Alma emits
-`subagent_message*` WebSocket events, color-keyed per subagent without showing
-raw task/message/call metadata in the header. Placeholder bodies are rendered
-with extmark virtual lines when expanded via `za` or `:AlmaToggleBlock`, so large
-tool payloads no longer inflate the markdown-like buffer. Use
+calls, raw events, and agent timeline events. Subagent streams render as
+color-keyed `Alma <agent>` source titles without inserting delegated content into
+the chat buffer, matching their role as specialized tool-call activity. Use
+`:AlmaAgentCrew` or `:Alma crews` to inspect the current thread's native Alma
+crew timeline, fetched from `/api/threads/{id}/agent-crew` and rendered as
+missions, sprint progress, active steps, contracts, evaluations, handoffs, and
+runs while hiding delegated message content. The same crew timeline also appears
+as compact virtual progress lines below the bottom composer, so the current task
+step stays visible without adding text to the buffer. Placeholder bodies are
+rendered with extmark virtual lines when expanded via `za` or `:AlmaToggleBlock`,
+so large tool payloads no longer inflate the markdown-like buffer. Use
 `:AlmaToolDetails` for the full, untruncated payload.
 
 Tool output rendering still uses a registry for expanded/detail views. Built-in

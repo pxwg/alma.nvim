@@ -30,6 +30,7 @@ M.known_ws_events = {
   skill_analysis_progress = true,
   generation_completed = true,
   generation_error = true,
+  proposal_received = true,
   stop_generation = true,
   subagent_message = true,
   subagent_message_added = true,
@@ -44,6 +45,128 @@ local function data_of(raw)
     return {}
   end
   return raw.data or raw.payload or raw
+end
+
+local function first_string(...)
+  for index = 1, select("#", ...) do
+    local value = select(index, ...)
+    if type(value) == "string" and value ~= "" then
+      return value
+    end
+  end
+  return ""
+end
+
+local function first_table(...)
+  for index = 1, select("#", ...) do
+    local value = select(index, ...)
+    if type(value) == "table" then
+      return value
+    end
+  end
+  return nil
+end
+
+local function table_list(value)
+  if type(value) ~= "table" then
+    return {}
+  end
+  if #value > 0 then
+    return value
+  end
+  local out = {}
+  for _, item in pairs(value) do
+    if type(item) == "table" then
+      table.insert(out, item)
+    end
+  end
+  return out
+end
+
+local function normalize_proposal_file(item)
+  if type(item) ~= "table" then
+    return nil
+  end
+  local diff = first_string(item.diff, item.patch, item.unified_diff, item.unifiedDiff)
+  local path = first_string(item.path, item.file, item.filename, item.name)
+  local relative_path = first_string(item.relative_path, item.relativePath, item.relpath)
+  if path == "" and relative_path == "" and diff == "" and type(item.hunks) ~= "table" then
+    return nil
+  end
+  return {
+    path = path ~= "" and path or nil,
+    relative_path = relative_path ~= "" and relative_path or nil,
+    diff = diff ~= "" and diff or nil,
+    hunks = type(item.hunks) == "table" and vim.deepcopy(item.hunks) or {},
+    raw = item,
+  }
+end
+
+local function proposal_payload(data)
+  data = type(data) == "table" and data or {}
+  return first_table(data.proposal, data.change, data.patchProposal, data.diffProposal) or data
+end
+
+local function proposal_files(source)
+  local files = {}
+  local list = table_list(first_table(source.files, source.changes, source.diffs, source.patches) or {})
+  for _, item in ipairs(list) do
+    local file = normalize_proposal_file(item)
+    if file then
+      table.insert(files, file)
+    end
+  end
+  local top_level_file = normalize_proposal_file(source)
+  if top_level_file and #files == 0 then
+    table.insert(files, top_level_file)
+  end
+  return files
+end
+
+local function proposal_like_name(name)
+  if type(name) ~= "string" then
+    return false
+  end
+  return name == "proposal_received" or name:find("proposal", 1, true) ~= nil
+end
+
+function M.normalize_proposal(data, fallback_thread_id)
+  local source = proposal_payload(data)
+  local files = proposal_files(source)
+  local id = first_string(source.id, source.proposal_id, source.proposalId, source.change_id, source.changeId)
+  local thread_id = first_string(
+    source.thread_id,
+    source.threadId,
+    source.parent_thread_id,
+    source.parentThreadId,
+    fallback_thread_id
+  )
+  local kind = first_string(source.kind, source.proposal_kind, source.proposalKind, source.format)
+  if kind == "" then
+    kind = #files > 0 and "diff" or "proposal"
+  end
+  local title = first_string(source.title, source.name, source.summary, source.subject)
+  if title == "" then
+    title = id ~= "" and ("Proposal " .. util.short_id(id)) or "Proposal"
+  end
+  local base_snapshot_id = first_string(
+    source.base_snapshot_id,
+    source.baseSnapshotId,
+    source.base_id,
+    source.baseId,
+    source.snapshot_id,
+    source.snapshotId
+  )
+
+  return {
+    id = id ~= "" and id or nil,
+    thread_id = thread_id ~= "" and thread_id or nil,
+    kind = kind,
+    title = title,
+    base_snapshot_id = base_snapshot_id ~= "" and base_snapshot_id or nil,
+    files = files,
+    raw = data,
+  }
 end
 
 local function composite_thread_id(...)
@@ -144,10 +267,16 @@ function M.normalize_ws_event(raw)
 
   local name = raw.type or raw.event or raw.name or "unknown"
   local data = data_of(raw)
+  local thread_id = M.thread_id_from(raw)
+  if proposal_like_name(name) then
+    data = M.normalize_proposal(data, thread_id)
+    thread_id = data.thread_id or thread_id
+    name = "proposal_received"
+  end
   return {
     type = "ws_event",
     name = name,
-    thread_id = M.thread_id_from(raw),
+    thread_id = thread_id,
     data = data,
     raw = raw,
     known = M.known_ws_events[name] == true,
