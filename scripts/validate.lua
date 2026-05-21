@@ -617,6 +617,42 @@ end
 hooks.clear()
 vim.api.nvim_clear_autocmds({ group = hook_group })
 
+hooks.clear("thread_changed")
+local slim_group = vim.api.nvim_create_augroup("alma_validate_slim_hooks", { clear = true })
+local heavy_thread = {
+  id = "validate-heavy-thread",
+  title = "Heavy Thread",
+  messages = { { id = "message-one" } },
+  blocks = { { type = "AssistantBlock", text = string.rep("x", 1024) } },
+}
+local callback_thread
+local autocmd_thread
+local autocmd_event
+hooks.on("thread_changed", function(event)
+  callback_thread = event.thread
+end)
+vim.api.nvim_create_autocmd("User", {
+  group = slim_group,
+  pattern = "AlmaThreadChanged",
+  callback = function(event)
+    autocmd_thread = event.data.thread
+    autocmd_event = event.data.event
+  end,
+})
+hooks.dispatch("thread_changed", {
+  thread_id = "validate-heavy-thread",
+  thread = heavy_thread,
+  event = { type = "rest_messages_loaded", messages = heavy_thread.messages },
+  effects = { { type = "render", thread_id = "validate-heavy-thread", payload = heavy_thread } },
+})
+assert_eq(callback_thread.messages, heavy_thread.messages, "hook callbacks keep full thread data")
+assert_eq(autocmd_thread.id, "validate-heavy-thread", "hook autocmd keeps thread identity")
+assert_eq(autocmd_thread.messages, nil, "hook autocmd omits heavy thread messages")
+assert_eq(autocmd_thread.blocks, nil, "hook autocmd omits heavy thread blocks")
+assert_eq(autocmd_event.message_count, 1, "hook autocmd keeps message count summary")
+hooks.clear()
+vim.api.nvim_clear_autocmds({ group = slim_group })
+
 ;(function()
 context.clear()
 local file_attachment = context.attach("validate-context-thread", {
@@ -1203,6 +1239,38 @@ ws._test.decode_frames(frame, function(decoded)
   seen = decoded.payload
 end)
 assert_eq(seen, "hello", "ws frame roundtrip")
+
+;(function()
+  local runtime_effects = require("alma.effects")
+  runtime_effects._test.reset_pending_rest()
+  local original_rest_messages = rest.messages
+  local message_fetch_callbacks = {}
+  local message_fetch_count = 0
+  state.get_thread("coalesce-thread")
+  rest.messages = function(_, callback)
+    message_fetch_count = message_fetch_count + 1
+    table.insert(message_fetch_callbacks, callback)
+  end
+  runtime_effects.run({
+    { type = "rest_fetch_messages", thread_id = "coalesce-thread" },
+    { type = "rest_fetch_messages", thread_id = "coalesce-thread" },
+    { type = "rest_fetch_messages", thread_id = "coalesce-thread" },
+  })
+  assert_eq(message_fetch_count, 1, "message refetch coalesces concurrent requests")
+  message_fetch_callbacks[1]({ { id = "message-one", message = { role = "assistant", parts = {} } } }, nil)
+  vim.wait(100, function()
+    return message_fetch_count == 2
+  end)
+  assert_eq(message_fetch_count, 2, "message refetch runs one queued follow-up")
+  runtime_effects.run({ { type = "rest_fetch_messages", thread_id = "coalesce-thread" } })
+  assert_eq(message_fetch_count, 2, "message refetch joins queued follow-up")
+  message_fetch_callbacks[2]({ { id = "message-two", message = { role = "assistant", parts = {} } } }, nil)
+  vim.wait(100, function()
+    return vim.tbl_isempty(runtime_effects._test.pending_rest)
+  end)
+  assert(vim.tbl_isempty(runtime_effects._test.pending_rest), "message refetch clears pending state")
+  rest.messages = original_rest_messages
+end)()
 
 thread.backend_generating = true
 thread.generation = "idle"

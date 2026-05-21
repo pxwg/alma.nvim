@@ -47,6 +47,104 @@ local function event_data(name, data)
   return event
 end
 
+local function slim_thread(thread)
+  if type(thread) ~= "table" then
+    return thread
+  end
+  return {
+    id = thread.id,
+    bufnr = thread.bufnr,
+    cwd = thread.cwd,
+    workspace_id = thread.workspace_id,
+    title = thread.title,
+    lifecycle = thread.lifecycle,
+    generation = thread.generation,
+    sync = thread.sync,
+    visibility = thread.visibility,
+    transport = thread.transport,
+    backend_generating = thread.backend_generating,
+    pending_request = thread.pending_request ~= nil,
+    last_event_at = thread.last_event_at,
+    last_refetch_at = thread.last_refetch_at,
+    last_error = thread.last_error,
+    status_message = thread.status_message,
+  }
+end
+
+local function slim_effect(effect)
+  if type(effect) ~= "table" then
+    return effect
+  end
+  return {
+    type = effect.type,
+    thread_id = effect.thread_id,
+    name = effect.name,
+    delay = effect.delay,
+    level = effect.level,
+    message = effect.message,
+  }
+end
+
+local function slim_effects(effects)
+  if type(effects) ~= "table" then
+    return effects
+  end
+  local out = {}
+  for index, effect in ipairs(effects) do
+    out[index] = slim_effect(effect)
+  end
+  return out
+end
+
+local function slim_ws_data(data)
+  if type(data) ~= "table" then
+    return data
+  end
+  return {
+    id = data.id,
+    threadId = data.threadId,
+    thread_id = data.thread_id,
+    isGenerating = data.isGenerating,
+    generating = data.generating,
+    error = data.error,
+    message = data.message,
+  }
+end
+
+local function slim_event(event)
+  if type(event) ~= "table" then
+    return event
+  end
+  return {
+    type = event.type,
+    name = event.name,
+    known = event.known,
+    thread_id = event.thread_id,
+    error = event.error,
+    data = slim_ws_data(event.data),
+    message_count = type(event.messages) == "table" and #event.messages or nil,
+    agent_crew_count = type(event.agent_crew) == "table" and #event.agent_crew or nil,
+  }
+end
+
+local function autocmd_event_data(name, event)
+  local out = {}
+  for key, value in pairs(event) do
+    if key == "thread" then
+      out.thread = slim_thread(value)
+    elseif key == "event" then
+      out.event = slim_event(value)
+    elseif key == "effects" then
+      out.effects = slim_effects(value)
+    elseif key == "proposal" and name == "proposal_received" then
+      out.proposal = value
+    else
+      out[key] = value
+    end
+  end
+  return out
+end
+
 local function record_error(errors, where, err)
   table.insert(errors, {
     where = where,
@@ -133,7 +231,7 @@ function M.dispatch(name, data)
 
   local ok, err = pcall(vim.api.nvim_exec_autocmds, "User", {
     pattern = autocmd_names[name],
-    data = event,
+    data = autocmd_event_data(name, event),
     modeline = false,
   })
   if not ok then

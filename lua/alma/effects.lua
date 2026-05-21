@@ -11,6 +11,11 @@ local M = {}
 
 local client = nil
 local running = false
+local pending_rest = {}
+
+local function rest_key(kind, thread_id)
+  return tostring(kind) .. ":" .. tostring(thread_id)
+end
 
 local function get_thread(thread_id)
   return state.get_thread(thread_id)
@@ -151,6 +156,52 @@ local function start_timer(thread_id, name, delay)
   end)
 end
 
+local function run_coalesced_rest(kind, thread_id, fetch, on_done)
+  local key = rest_key(kind, thread_id)
+  local pending = pending_rest[key]
+  if pending then
+    pending.queued = true
+    return
+  end
+
+  pending_rest[key] = { queued = false }
+  fetch(thread_id, function(data, err)
+    local completed = pending_rest[key]
+    local queued = completed and completed.queued
+    pending_rest[key] = nil
+
+    on_done(data, err)
+
+    if queued and get_thread(thread_id) then
+      vim.schedule(function()
+        if get_thread(thread_id) then
+          run_coalesced_rest(kind, thread_id, fetch, on_done)
+        end
+      end)
+    end
+  end)
+end
+
+local function fetch_messages(thread_id)
+  run_coalesced_rest("messages", thread_id, rest.messages, function(data, err)
+    if data then
+      dispatch(thread_id, { type = "rest_messages_loaded", messages = data })
+    else
+      dispatch(thread_id, { type = "rest_error", error = err })
+    end
+  end)
+end
+
+local function fetch_agent_crew(thread_id)
+  run_coalesced_rest("agent_crew", thread_id, rest.agent_crew, function(data, err)
+    if data then
+      dispatch(thread_id, { type = "rest_agent_crew_loaded", agent_crew = data })
+    else
+      dispatch(thread_id, { type = "rest_agent_crew_error", error = err })
+    end
+  end)
+end
+
 local function run_one(effect)
   if effect.type == "ws_send" then
     M.send_ws(effect.thread_id, effect.payload)
@@ -163,21 +214,9 @@ local function run_one(effect)
       end
     end)
   elseif effect.type == "rest_fetch_messages" then
-    rest.messages(effect.thread_id, function(data, err)
-      if data then
-        dispatch(effect.thread_id, { type = "rest_messages_loaded", messages = data })
-      else
-        dispatch(effect.thread_id, { type = "rest_error", error = err })
-      end
-    end)
+    fetch_messages(effect.thread_id)
   elseif effect.type == "rest_fetch_agent_crew" then
-    rest.agent_crew(effect.thread_id, function(data, err)
-      if data then
-        dispatch(effect.thread_id, { type = "rest_agent_crew_loaded", agent_crew = data })
-      else
-        dispatch(effect.thread_id, { type = "rest_agent_crew_error", error = err })
-      end
-    end)
+    fetch_agent_crew(effect.thread_id)
   elseif effect.type == "start_timer" then
     start_timer(effect.thread_id, effect.name, effect.delay)
   elseif effect.type == "stop_timer" then
@@ -219,5 +258,13 @@ end
 function M.stop(thread_id)
   dispatch(thread_id, { type = "stop_requested" })
 end
+
+M._test = {
+  pending_rest = pending_rest,
+  reset_pending_rest = function()
+    pending_rest = {}
+    M._test.pending_rest = pending_rest
+  end,
+}
 
 return M
